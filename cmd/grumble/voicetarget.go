@@ -4,7 +4,9 @@
 
 package main
 
-import "mumble.info/grumble/pkg/acl"
+import (
+	"mumble.info/grumble/pkg/acl"
+)
 
 // A VoiceTarget holds information about a single
 // VoiceTarget entry of a Client.
@@ -131,6 +133,14 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 
 	if len(fromChannels) > 0 {
 		for _, target := range fromChannels {
+			if !server.canReceiveFromClient(target, client) {
+				server.logVoiceCrossBoardAccessDenied(target.teamlancerIdentity, target.Channel, "voice_target_receive_board_mismatch")
+				continue
+			}
+			if !server.canReceiveVoice(target) {
+				server.logVoicePermissionDenied("voice_permission_denied", target, "receive_audio", "receive")
+				continue
+			}
 			buf[0] = kind | 2
 			err := target.SendUDP(buf)
 			if err != nil {
@@ -141,8 +151,15 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 
 	if len(direct) > 0 {
 		for _, target := range direct {
+			if !server.canReceiveFromClient(target, client) {
+				server.logVoiceCrossBoardAccessDenied(target.teamlancerIdentity, target.Channel, "voice_target_receive_board_mismatch")
+				continue
+			}
+			if !server.canReceiveVoice(target) {
+				server.logVoicePermissionDenied("voice_permission_denied", target, "receive_audio", "receive")
+				continue
+			}
 			buf[0] = kind | 2
-			target.SendUDP(buf)
 			err := target.SendUDP(buf)
 			if err != nil {
 				target.Panicf("Unable to send UDP packet: %v", err.Error())

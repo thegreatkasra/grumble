@@ -10,6 +10,7 @@ import (
 func TestRuntimeConfigValidDefaults(t *testing.T) {
 	cfg := RuntimeConfig{
 		TeamlancerMode:          true,
+		TeamlancerAuthMode:      "legacy",
 		WebBindAddress:          "0.0.0.0",
 		WebPort:                 7880,
 		EnableWeb:               true,
@@ -205,10 +206,14 @@ func TestLoadRuntimeConfigUsesDefaultsWhenEnvAbsent(t *testing.T) {
 	if cfg.EnableUDP {
 		t.Fatal("expected UDP to default disabled")
 	}
+	if cfg.EffectiveTeamlancerAuthMode() != "legacy" {
+		t.Fatalf("expected default auth mode legacy, got %q", cfg.EffectiveTeamlancerAuthMode())
+	}
 }
 
 func validRuntimeConfigForTests() RuntimeConfig {
 	return RuntimeConfig{
+		TeamlancerAuthMode:      "legacy",
 		WebBindAddress:          "0.0.0.0",
 		WebPort:                 7880,
 		WebSocketPath:           "/connect",
@@ -235,6 +240,7 @@ func setValidRuntimeEnv(t *testing.T) {
 	Args.DataDir = filepath.Clean(defaultDataDir())
 	t.Setenv("TEAMLANCER_MODE", "true")
 	t.Setenv("WEB_BIND_ADDRESS", "0.0.0.0")
+	t.Setenv("TEAMLANCER_AUTH_MODE", "legacy")
 	t.Setenv("WEB_PORT", "7880")
 	t.Setenv("ENABLE_WEB", "true")
 	t.Setenv("WEBSOCKET_PATH", "/connect")

@@ -8,6 +8,7 @@ import (
 	"crypto/aes"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -575,6 +576,16 @@ func (server *Server) handleUserStateMessage(client *Client, msg *Message) {
 		// Destination channel
 		dstChan, ok := server.Channels[int(*userstate.ChannelId)]
 		if !ok {
+			return
+		}
+
+		if server.boardVoiceIsolationApplies(target.teamlancerIdentity) && !server.canMoveBoardScopedClient(target, dstChan) {
+			reason := "unrelated_channel"
+			if room, ok := server.findBoardVoiceRoomByChannel(dstChan); ok && strings.TrimSpace(room.BoardID) != strings.TrimSpace(target.teamlancerIdentity.BoardID) {
+				reason = "cross_board_channel"
+			}
+			server.logVoiceChannelMoveDenied(target, dstChan, reason)
+			client.sendPermissionDenied(target, dstChan, acl.EnterPermission)
 			return
 		}
 
@@ -1413,10 +1424,26 @@ func (server *Server) handleVoiceTarget(client *Client, msg *Message) {
 	for _, target := range vt.Targets {
 		newTarget := &VoiceTarget{}
 		for _, session := range target.Session {
+			targetClient, ok := server.getClient(session)
+			if !ok {
+				continue
+			}
+			if !server.canAccessVoiceTargetChannel(client, targetClient.Channel) {
+				server.logVoiceCrossBoardAccessDenied(client.teamlancerIdentity, targetClient.Channel, "voice_target_session_cross_board")
+				continue
+			}
 			newTarget.AddSession(session)
 		}
 		if target.ChannelId != nil {
 			chanid := *target.ChannelId
+			channel, ok := server.Channels[int(chanid)]
+			if !ok {
+				continue
+			}
+			if !server.canAccessVoiceTargetChannel(client, channel) {
+				server.logVoiceCrossBoardAccessDenied(client.teamlancerIdentity, channel, "voice_target_channel_cross_board")
+				continue
+			}
 			group := ""
 			links := false
 			subchannels := false

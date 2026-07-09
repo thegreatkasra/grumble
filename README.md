@@ -49,6 +49,7 @@ Production example:
 
 ```env
 TEAMLANCER_MODE=true
+TEAMLANCER_AUTH_MODE=legacy
 WEB_BIND_ADDRESS=0.0.0.0
 WEB_PORT=7880
 ENABLE_WEB=true
@@ -89,6 +90,7 @@ docker run \
   -p 7880:7880 \
   -p 64738:64738 \
   -e TEAMLANCER_MODE=true \
+  -e TEAMLANCER_AUTH_MODE=legacy \
   -e WEB_BIND_ADDRESS=0.0.0.0 \
   -e WEB_PORT=7880 \
   -e ENABLE_WEB=true \
@@ -130,3 +132,169 @@ Notes:
 - Public WebSocket remains disabled by default until Stage 2 authentication exists.
 - UDP remains intentionally disabled in Teamlancer mode.
 - Horizontal scaling is not supported in this stage.
+
+## Teamlancer Voice Authentication
+
+When `TEAMLANCER_MODE=true` and `TEAMLANCER_AUTH_MODE=internal`, Grumble validates a short-lived Teamlancer voice token instead of using legacy Grumble username/password or certificate authentication. Legacy authentication remains unchanged when `TEAMLANCER_AUTH_MODE=legacy`.
+
+Authentication flow:
+
+```text
+Browser
+  |
+  | request voice access
+  v
+Teamlancer Backend
+  |
+  | short-lived Voice Token (JWT)
+  v
+Grumble Teamlancer Authenticator
+  |
+  | validated identity
+  v
+Grumble session
+```
+
+The browser does not send the primary Teamlancer application JWT directly to Grumble. The Teamlancer backend mints a dedicated short-lived voice token, and Grumble validates:
+
+- JWT signature with `TEAMLANCER_JWT_SECRET`
+- `exp` expiration
+- `iss` issuer against `TEAMLANCER_JWT_ISSUER`
+- `aud` audience against `TEAMLANCER_JWT_AUDIENCE`
+- required claims: `sub`, `name`, `exp`
+
+Optional claims are mapped into `pkg/teamlancer/auth.UserIdentity`:
+
+- `team_id` -> `TeamID`
+- `board_id` -> `BoardID`
+- `permissions` -> `Permissions`
+
+Permission model:
+
+- `JoinVoice`
+- `PublishAudio`
+- `ReceiveAudio`
+- `ModerateVoice`
+
+Default permissions when the claim is omitted:
+
+- `JoinVoice=true`
+- `PublishAudio=true`
+- `ReceiveAudio=true`
+- `ModerateVoice=false`
+
+JWT configuration for internal mode:
+
+```env
+TEAMLANCER_AUTH_MODE=internal
+TEAMLANCER_JWT_SECRET=replace-me
+TEAMLANCER_JWT_ISSUER=teamlancer
+TEAMLANCER_JWT_AUDIENCE=grumble-voice
+```
+
+Failure handling:
+
+- authentication failures emit `voice_auth_failed`
+- clients receive a generic authentication rejection
+- JWT contents and secrets are never written to structured logs
+
+## Teamlancer Voice Permissions
+
+Permission flow:
+
+```text
+JWT Voice Token
+        |
+        v
+JWT validation
+        |
+        v
+UserIdentity
+        |
+        v
+Permission guard
+        |
+        +--> JoinVoice -> session authentication
+        +--> PublishAudio -> outgoing voice packets
+        +--> ReceiveAudio -> voice fanout to listeners
+        +--> ModerateVoice -> moderation hook foundation
+```
+
+Authentication:
+
+- Teamlancer mints a short-lived voice JWT for Grumble.
+- Grumble validates signature, issuer, audience, expiry, and required claims.
+- A valid token is mapped into `pkg/teamlancer/auth.UserIdentity`.
+
+Identity:
+
+- `UserIdentity` carries `UserID`, `DisplayName`, `TeamID`, `BoardID`, and `Permissions`.
+- Permission checks now read from the identity attached to the authenticated Grumble client.
+
+Authorization:
+
+- `JoinVoice` is enforced before a client session is finalized. Denied joins keep the existing generic auth failure behavior and emit `voice_auth_failed`.
+- `PublishAudio` is enforced when a client sends voice. Denied packets are dropped, the client stays connected, and structured logs emit `voice_publish_denied` plus `voice_permission_denied`.
+- `ReceiveAudio` is enforced during broadcast fanout. Denied listeners stay connected but do not receive forwarded audio, and structured logs emit `voice_permission_denied`.
+- `ModerateVoice` now has guard hooks for future mute, move, and disconnect actions. Board-room-specific authorization is not implemented yet.
+
+## Teamlancer Board Voice Rooms
+
+Board voice routing now resolves authenticated Teamlancer users into an in-memory board room when `board_id` is present on the voice identity.
+
+Architecture:
+
+```text
+WorkspaceBoard
+        |
+        v
+BoardVoiceRoom
+        |
+        v
+Grumble Channel
+```
+
+Behavior:
+
+- `board_id` maps to exactly one active in-memory `VoiceRoom`.
+- The Grumble channel name is deterministic: `teamlancer-board-{boardId}`.
+- Users on the same board join the same Grumble channel.
+- Different boards never share a Grumble channel.
+- If `board_id` is absent, the existing root/default channel flow remains unchanged.
+- Empty board rooms are removed automatically when the last participant leaves.
+
+Lifecycle events:
+
+- `voice_room_created`
+- `voice_room_joined`
+- `voice_room_left`
+- `voice_room_empty`
+- `voice_room_destroyed`
+
+Structured room logs include `room_id`, `board_id`, `team_id`, and `user_id`. JWTs, tokens, and secrets are never logged.
+
+## Board Voice Isolation
+
+Board voice isolation is now enforced at runtime, not only during initial room assignment.
+
+Flow:
+
+```text
+UserIdentity
+     |
+     v
+BoardVoiceRoom
+     |
+     v
+Channel
+```
+
+Rules:
+
+- A Teamlancer user with `board_id` can only remain in or move back into the channel owned by that board room.
+- Moves into other board channels or unrelated channels are denied when Teamlancer internal auth mode is active.
+- Voice target setup and receive fanout both verify that sender and target resolve to the same board room.
+- Cross-board audio routing is dropped and emits `voice_cross_board_access_denied`.
+- Channel move denials emit `voice_channel_move_denied`.
+
+Structured denial logs include `user_id`, `board_id`, `requested_channel`, and `reason`. JWTs, tokens, and secrets are never logged.

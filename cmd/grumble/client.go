@@ -20,6 +20,8 @@ import (
 	"mumble.info/grumble/pkg/cryptstate"
 	"mumble.info/grumble/pkg/mumbleproto"
 	"mumble.info/grumble/pkg/packetdata"
+	tlauth "mumble.info/grumble/pkg/teamlancer/auth"
+	tlguard "mumble.info/grumble/pkg/teamlancer/auth/guard"
 )
 
 // A client connection
@@ -61,6 +63,8 @@ type Client struct {
 	// If the client is a registered user on the server,
 	// the user field will point to the registration record.
 	user *User
+
+	teamlancerIdentity *tlauth.UserIdentity
 
 	// The clientReady channel signals the client's reciever routine that
 	// the client has been successfully authenticated and that it has been
@@ -346,6 +350,12 @@ func (client *Client) udpRecvLoop() {
 			}
 			fallthrough
 		case mumbleproto.UDPMessageVoiceOpus:
+			if !client.canPublishVoice() {
+				client.server.logVoicePermissionDenied("voice_publish_denied", client, "publish_audio", "publish")
+				client.server.logVoicePermissionDenied("voice_permission_denied", client, "publish_audio", "publish")
+				continue
+			}
+
 			target := buf[0] & 0x1f
 			var counter uint8
 			outbuf := make([]byte, 1024)
@@ -392,6 +402,13 @@ func (client *Client) udpRecvLoop() {
 			}
 		}
 	}
+}
+
+func (client *Client) canPublishVoice() bool {
+	if !client.server.teamlancerPermissionEnforcementEnabled() {
+		return true
+	}
+	return tlguard.CanPublishAudio(client.teamlancerIdentity)
 }
 
 // Send buf as a UDP message. If the client does not have

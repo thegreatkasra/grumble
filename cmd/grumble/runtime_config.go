@@ -10,35 +10,38 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	tlauth "mumble.info/grumble/pkg/teamlancer/auth"
 )
 
 type RuntimeConfig struct {
-	TeamlancerMode            bool
-	WebBindAddress            string
-	WebPort                   int
-	EnableWeb                 bool
-	WebSocketPath             string
-	RawMumbleTCPBindAddress   string
-	RawMumbleTCPPort          int
-	EnableRawMumbleTCP        bool
-	EnableUDP                 bool
-	HealthPath                string
-	ReadinessPath             string
-	DataDir                   string
-	LogLevel                  string
-	LogFormat                 string
-	AllowedOrigins            []Origin
-	AllowDevelopmentOrigins   bool
-	WSMaxMessageBytes         int64
-	WSAcceptQueueSize         int
-	WSIdleTimeout             time.Duration
-	WSWriteTimeout            time.Duration
-	WSPingInterval            time.Duration
-	MaxConnections            int
-	MaxConnectionsPerIP       int
-	ShutdownTimeout           time.Duration
-	EnablePublicWebSocket     bool
-	TrustProxyHeaders         bool
+	TeamlancerMode          bool
+	TeamlancerAuthMode      string
+	WebBindAddress          string
+	WebPort                 int
+	EnableWeb               bool
+	WebSocketPath           string
+	RawMumbleTCPBindAddress string
+	RawMumbleTCPPort        int
+	EnableRawMumbleTCP      bool
+	EnableUDP               bool
+	HealthPath              string
+	ReadinessPath           string
+	DataDir                 string
+	LogLevel                string
+	LogFormat               string
+	AllowedOrigins          []Origin
+	AllowDevelopmentOrigins bool
+	WSMaxMessageBytes       int64
+	WSAcceptQueueSize       int
+	WSIdleTimeout           time.Duration
+	WSWriteTimeout          time.Duration
+	WSPingInterval          time.Duration
+	MaxConnections          int
+	MaxConnectionsPerIP     int
+	ShutdownTimeout         time.Duration
+	EnablePublicWebSocket   bool
+	TrustProxyHeaders       bool
 }
 
 type Origin struct {
@@ -65,6 +68,7 @@ func LoadRuntimeConfig() (RuntimeConfig, error) {
 	if cfg.TeamlancerMode, err = getEnvBoolStrict("TEAMLANCER_MODE", false); err != nil {
 		return RuntimeConfig{}, err
 	}
+	cfg.TeamlancerAuthMode = strings.ToLower(getEnv("TEAMLANCER_AUTH_MODE", tlauth.ModeLegacy))
 	if cfg.WebBindAddress, err = getEnvIP("WEB_BIND_ADDRESS", "0.0.0.0"); err != nil {
 		return RuntimeConfig{}, err
 	}
@@ -149,6 +153,11 @@ func LoadRuntimeConfig() (RuntimeConfig, error) {
 }
 
 func (cfg RuntimeConfig) Validate() error {
+	switch cfg.EffectiveTeamlancerAuthMode() {
+	case tlauth.ModeInternal, tlauth.ModeLegacy:
+	default:
+		return fmt.Errorf("TEAMLANCER_AUTH_MODE must be one of %q or %q", tlauth.ModeInternal, tlauth.ModeLegacy)
+	}
 	if err := validateTCPPort(cfg.WebPort, "WEB_PORT"); err != nil {
 		return err
 	}
@@ -195,6 +204,14 @@ func (cfg RuntimeConfig) Validate() error {
 		return fmt.Errorf("invalid RAW_MUMBLE_TCP_BIND_ADDRESS: %q", cfg.RawMumbleTCPBindAddress)
 	}
 	return nil
+}
+
+func (cfg RuntimeConfig) EffectiveTeamlancerAuthMode() string {
+	mode := strings.ToLower(strings.TrimSpace(cfg.TeamlancerAuthMode))
+	if mode == "" {
+		return tlauth.ModeLegacy
+	}
+	return mode
 }
 
 func (cfg RuntimeConfig) VerifyDataDirWritable() error {

@@ -188,7 +188,9 @@ func TestReserveConnectionEnforcesGlobalAndPerIPLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	server.initPerLaunchData()
+	if err := server.initPerLaunchData(); err != nil {
+		t.Fatalf("init per launch data: %v", err)
+	}
 	defer server.cleanPerLaunchData()
 
 	addr1 := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1111}
@@ -218,7 +220,9 @@ func TestReleaseReservedConnectionIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	server.initPerLaunchData()
+	if err := server.initPerLaunchData(); err != nil {
+		t.Fatalf("init per launch data: %v", err)
+	}
 	defer server.cleanPerLaunchData()
 
 	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1111}
@@ -261,6 +265,7 @@ func newTeamlancerTestServer(t *testing.T, enableRawTCP bool) (*Server, func()) 
 	rawPort := reserveTCPPort(t)
 	runtimeConfig = RuntimeConfig{
 		TeamlancerMode:          true,
+		TeamlancerAuthMode:      "legacy",
 		WebBindAddress:          "127.0.0.1",
 		WebPort:                 webPort,
 		EnableWeb:               true,

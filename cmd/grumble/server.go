@@ -34,6 +34,9 @@ import (
 	"mumble.info/grumble/pkg/mumbleproto"
 	"mumble.info/grumble/pkg/serverconf"
 	"mumble.info/grumble/pkg/sessionpool"
+	tlauth "mumble.info/grumble/pkg/teamlancer/auth"
+	tlguard "mumble.info/grumble/pkg/teamlancer/auth/guard"
+	tlvoice "mumble.info/grumble/pkg/teamlancer/voice"
 	"mumble.info/grumble/pkg/web"
 )
 
@@ -129,6 +132,10 @@ type Server struct {
 
 	// Logging
 	*log.Logger
+
+	teamlancerAuthenticator tlauth.Authenticator
+	teamlancerModeration    tlguard.ModerationHooks
+	teamlancerVoiceRooms    *tlvoice.VoiceRoomManager
 }
 
 type clientLogForwarder struct {
@@ -164,6 +171,7 @@ func NewServer(id int64) (s *Server, err error) {
 	s.nextChanId = 1
 
 	s.Logger = log.New(logtarget.Default, fmt.Sprintf("[%v] ", s.Id), log.LstdFlags|log.Lmicroseconds)
+	s.teamlancerModeration = tlguard.PermissionModerationHooks{}
 
 	return
 }
@@ -368,6 +376,22 @@ func (server *Server) RemoveClient(client *Client, kicked bool) {
 		channel.RemoveClient(client)
 	}
 
+	if room, empty, destroyed := server.leaveBoardVoiceRoom(client); room != nil {
+		server.logVoiceRoomEvent("voice_room_left", room, client.teamlancerIdentity.UserID)
+		if empty {
+			server.logVoiceRoomEvent("voice_room_empty", room, client.teamlancerIdentity.UserID)
+		}
+		if destroyed {
+			server.logVoiceRoomEvent("voice_room_destroyed", room, client.teamlancerIdentity.UserID)
+			if channel != nil && channel.IsTemporary() && channel.IsEmpty() {
+				select {
+				case server.tempRemove <- channel:
+				default:
+				}
+			}
+		}
+	}
+
 	// If the user was not kicked, broadcast a UserRemove message.
 	// If the user is disconnect via a kick, the UserRemove message has already been sent
 	// at this point.
@@ -431,11 +455,20 @@ func (server *Server) handlerLoop() {
 			if vb.target == 0 { // Current channel
 				channel := vb.client.Channel
 				for _, client := range channel.ClientsSnapshot() {
-					if client != vb.client {
-						err := client.SendUDP(vb.buf)
-						if err != nil {
-							client.Panicf("Unable to send UDP: %v", err)
-						}
+					if client == vb.client {
+						continue
+					}
+					if !server.canReceiveFromClient(client, vb.client) {
+						server.logVoiceCrossBoardAccessDenied(client.teamlancerIdentity, channel, "receive_board_mismatch")
+						continue
+					}
+					if !server.canReceiveVoice(client) {
+						server.logVoicePermissionDenied("voice_permission_denied", client, "receive_audio", "receive")
+						continue
+					}
+					err := client.SendUDP(vb.buf)
+					if err != nil {
+						client.Panicf("Unable to send UDP: %v", err)
 					}
 				}
 			} else {
@@ -513,76 +546,31 @@ func (server *Server) handleAuthenticate(client *Client, msg *Message) {
 		return
 	}
 
+	server.logAuthEvent("info", "voice_auth_started", client, "", nil)
+
 	// Did we get a username?
 	if auth.Username == nil || len(*auth.Username) == 0 {
-		client.RejectAuth(mumbleproto.Reject_InvalidUsername, "Please specify a username to log in")
+		server.logAuthEvent("warn", "voice_auth_failed", client, "", map[string]string{
+			"reason": "missing_username",
+		})
+		authRejectForInvalidUsername(client)
 		return
 	}
 
-	client.Username = *auth.Username
-
-	if client.Username == "SuperUser" {
-		if auth.Password == nil {
-			client.RejectAuth(mumbleproto.Reject_WrongUserPW, "")
-			return
-		} else {
-			if server.CheckSuperUserPassword(*auth.Password) {
-				ok := false
-				client.user, ok = server.UserNameMap[client.Username]
-				if !ok {
-					client.RejectAuth(mumbleproto.Reject_InvalidUsername, "")
-					return
-				}
-			} else {
-				client.RejectAuth(mumbleproto.Reject_WrongUserPW, "")
-				return
-			}
-		}
+	authenticated := false
+	if runtimeConfig.TeamlancerMode && runtimeConfig.EffectiveTeamlancerAuthMode() == tlauth.ModeInternal {
+		authenticated = server.handleTeamlancerAuthenticate(client, auth)
 	} else {
-		// First look up registration by name.
-		user, exists := server.UserNameMap[client.Username]
-		if exists {
-			if client.HasCertificate() && user.CertHash == client.CertHash() {
-				client.user = user
-			} else {
-				client.RejectAuth(mumbleproto.Reject_WrongUserPW, "Wrong certificate hash")
-				return
-			}
-		}
-
-		// Name matching didn't do.  Try matching by certificate.
-		if client.user == nil && client.HasCertificate() {
-			user, exists := server.UserCertMap[client.CertHash()]
-			if exists {
-				client.user = user
-			}
-		}
+		authenticated = server.handleLegacyAuthenticate(client, auth)
 	}
-
-	if client.user == nil && server.hasServerPassword() {
-		if auth.Password == nil || !server.CheckServerPassword(*auth.Password) {
-			client.RejectAuth(mumbleproto.Reject_WrongServerPW, "Invalid server password")
-			return
-		}
-	}
-
-	// Setup the cryptstate for the client.
-	err = client.crypt.GenerateKey(client.CryptoMode)
-	if err != nil {
-		client.Panicf("%v", err)
+	if !authenticated {
 		return
 	}
 
-	// Send CryptState information to the client so it can establish an UDP connection,
-	// if it wishes.
-	client.lastResync = time.Now().Unix()
-	err = client.sendMessage(&mumbleproto.CryptSetup{
-		Key:         client.crypt.Key,
-		ClientNonce: client.crypt.DecryptIV,
-		ServerNonce: client.crypt.EncryptIV,
-	})
+	err = readyClientAuthentication(client)
 	if err != nil {
 		client.Panicf("%v", err)
+		return
 	}
 
 	// Add codecs
@@ -613,6 +601,9 @@ func (server *Server) finishAuthenticate(client *Client) {
 		// The user is already present on the server.
 		if found {
 			// todo(mkrautz): Do the address checking.
+			server.logAuthEvent("warn", "voice_auth_failed", client, server.authenticationUsername(client), map[string]string{
+				"reason": "username_in_use",
+			})
 			client.RejectAuth(mumbleproto.Reject_UsernameInUse, "A client is already connected using those credentials.")
 			return
 		}
@@ -620,8 +611,32 @@ func (server *Server) finishAuthenticate(client *Client) {
 		// No, that user isn't already connected. Move along.
 	}
 
+	channel, err := server.resolveAuthenticatedChannel(client)
+	if err != nil {
+		server.logAuthEvent("warn", "voice_auth_failed", client, server.authenticationUsername(client), map[string]string{
+			"reason": "voice_room_join_denied",
+		})
+		client.RejectAuth(mumbleproto.Reject_WrongUserPW, "Authentication failed")
+		return
+	}
+	room, created, err := server.joinBoardVoiceRoom(client.teamlancerIdentity, channel)
+	if err != nil {
+		server.logAuthEvent("warn", "voice_auth_failed", client, server.authenticationUsername(client), map[string]string{
+			"reason": "voice_room_join_denied",
+		})
+		client.RejectAuth(mumbleproto.Reject_WrongUserPW, "Authentication failed")
+		return
+	}
+	if created {
+		server.logVoiceRoomEvent("voice_room_created", room, client.teamlancerIdentity.UserID)
+	}
+	if room != nil {
+		server.logVoiceRoomEvent("voice_room_joined", room, client.teamlancerIdentity.UserID)
+	}
+
 	// Add the client to the connected list
 	server.setClient(client)
+	server.logAuthEvent("info", "voice_auth_success", client, server.authenticationUsername(client), nil)
 
 	// Warn clients without CELT support that they might not be able to talk to everyone else.
 	if len(client.codecs) == 0 {
@@ -646,14 +661,6 @@ func (server *Server) finishAuthenticate(client *Client) {
 	server.hmutex.Lock()
 	server.hclients[host] = append(server.hclients[host], client)
 	server.hmutex.Unlock()
-
-	channel := server.RootChannel()
-	if client.IsRegistered() {
-		lastChannel := server.Channels[client.user.LastChannelId]
-		if lastChannel != nil {
-			channel = lastChannel
-		}
-	}
 
 	userstate := &mumbleproto.UserState{
 		Session:   proto.Uint32(client.Session()),
@@ -721,7 +728,7 @@ func (server *Server) finishAuthenticate(client *Client) {
 		return
 	}
 
-	err := client.sendMessage(&mumbleproto.ServerConfig{
+	err = client.sendMessage(&mumbleproto.ServerConfig{
 		AllowHtml:          proto.Bool(server.cfg.BoolValue("AllowHTML")),
 		MessageLength:      proto.Uint32(server.cfg.Uint32Value("MaxTextMessageLength")),
 		ImageMessageLength: proto.Uint32(server.cfg.Uint32Value("MaxImageMessageLength")),
@@ -1450,7 +1457,7 @@ func isTimeout(err error) bool {
 }
 
 // Initialize the per-launch data
-func (server *Server) initPerLaunchData() {
+func (server *Server) initPerLaunchData() error {
 	server.pool = sessionpool.New()
 	server.clients = make(map[uint32]*Client)
 	server.hclients = make(map[string][]*Client)
@@ -1463,11 +1470,14 @@ func (server *Server) initPerLaunchData() {
 	server.cfgUpdate = make(chan *KeyValuePair)
 	server.tempRemove = make(chan *Channel, 1)
 	server.clientAuthenticated = make(chan *Client)
+	server.teamlancerVoiceRooms = tlvoice.NewVoiceRoomManager()
+	return server.configureAuthenticator()
 }
 
 // Clean per-launch data
 func (server *Server) cleanPerLaunchData() {
 	server.pool = nil
+	server.teamlancerVoiceRooms = nil
 }
 
 // Port returns the port the native server will listen on when it is
@@ -1680,7 +1690,9 @@ func (server *Server) Start() (err error) {
 
 	// Reset the server's per-launch data to
 	// a clean state.
-	server.initPerLaunchData()
+	if err := server.initPerLaunchData(); err != nil {
+		return err
+	}
 
 	// Launch the event handler goroutine
 	go server.handlerLoop()
@@ -1856,6 +1868,36 @@ func (server *Server) setClient(client *Client) {
 	server.clientmu.Lock()
 	defer server.clientmu.Unlock()
 	server.clients[client.Session()] = client
+}
+
+func (server *Server) canReceiveVoice(client *Client) bool {
+	if !server.teamlancerPermissionEnforcementEnabled() {
+		return true
+	}
+	return tlguard.CanReceiveAudio(client.teamlancerIdentity)
+}
+
+func (server *Server) logVoicePermissionDenied(event string, client *Client, permission, action string) {
+	userID := ""
+	if client != nil && client.teamlancerIdentity != nil {
+		userID = client.teamlancerIdentity.UserID
+	}
+	fields := map[string]string{
+		"permission": permission,
+		"action":     action,
+	}
+	if userID != "" {
+		fields["user_id"] = userID
+	}
+	if client != nil {
+		fields["connection_id"] = client.connectionID
+		fields["listener_type"] = client.listenerType
+	}
+	emitStructuredEvent(server.Logger, "warn", event, fields)
+}
+
+func (server *Server) teamlancerPermissionEnforcementEnabled() bool {
+	return runtimeConfig.TeamlancerMode && server.effectiveAuthMode() == tlauth.ModeInternal
 }
 
 // Set will set a configuration value
