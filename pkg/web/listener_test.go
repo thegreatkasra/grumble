@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -170,11 +171,11 @@ func TestPingPongKeepsConnectionAlive(t *testing.T) {
 	serverConn := acceptTestConn(t, l)
 	defer serverConn.Close()
 
-	var pingCount int
+	var pingCount atomic.Int32
 	messageCh := make(chan []byte, 1)
 	readDone := make(chan struct{})
 	clientConn.SetPingHandler(func(appData string) error {
-		pingCount++
+		pingCount.Add(1)
 		deadline := time.Now().Add(time.Second)
 		return clientConn.WriteControl(websocket.PongMessage, []byte(appData), deadline)
 	})
@@ -192,7 +193,7 @@ func TestPingPongKeepsConnectionAlive(t *testing.T) {
 	}()
 
 	time.Sleep(2 * l.cfg.IdleTimeout)
-	if pingCount == 0 {
+	if pingCount.Load() == 0 {
 		t.Fatal("expected websocket ping/pong activity before idle timeout")
 	}
 

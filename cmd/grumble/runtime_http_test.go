@@ -18,6 +18,15 @@ func TestHealthEndpoint(t *testing.T) {
 	if got := rec.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("expected application/json, got %q", got)
 	}
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unable to decode body: %v", err)
+	}
+	if payload.Status != "ok" {
+		t.Fatalf("expected status ok, got %q", payload.Status)
+	}
 }
 
 func TestHealthEndpointRejectsNonGet(t *testing.T) {
@@ -44,6 +53,19 @@ func TestReadyEndpointBeforeAndAfterInitialization(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 before ready, got %d", rec.Code)
 	}
+	var notReady struct {
+		Status string            `json:"status"`
+		Checks map[string]string `json:"checks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &notReady); err != nil {
+		t.Fatalf("unable to decode not ready body: %v", err)
+	}
+	if notReady.Status != "not_ready" {
+		t.Fatalf("expected not_ready status before ready, got %q", notReady.Status)
+	}
+	if len(notReady.Checks) == 0 {
+		t.Fatal("expected readiness checks to be preserved before ready")
+	}
 
 	state.SetCheck("dataDirectory", "ok")
 	state.SetCheck("webListener", "ok")
@@ -63,6 +85,12 @@ func TestReadyEndpointBeforeAndAfterInitialization(t *testing.T) {
 	state.ReadyHandler(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 during shutdown, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &notReady); err != nil {
+		t.Fatalf("unable to decode shutdown body: %v", err)
+	}
+	if notReady.Status != "not_ready" {
+		t.Fatalf("expected not_ready status during shutdown, got %q", notReady.Status)
 	}
 }
 

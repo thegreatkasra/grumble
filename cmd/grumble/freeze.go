@@ -31,7 +31,7 @@ func (server *Server) FreezeToFile() error {
 		return err
 	}
 
-	if server.running {
+	if server.running.Load() {
 		// Re-open the freeze log.
 		err = server.openFreezeLog()
 		if err != nil {

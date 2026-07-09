@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +68,95 @@ func TestServerStartWithoutRawTCP(t *testing.T) {
 	if server.udpconn != nil {
 		t.Fatal("expected udp listener to remain nil")
 	}
+}
+
+func TestTeamlancerLifecycleStartupEventsWithoutUDP(t *testing.T) {
+	server, cleanup := newTeamlancerTestServer(t, true)
+	defer cleanup()
+
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	server.Logger = logger
+
+	if err := server.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer func() {
+		if err := server.Stop(); err != nil {
+			t.Fatalf("stop failed: %v", err)
+		}
+	}()
+
+	markRuntimeReady(logger)
+
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	assertEventPresent(t, events, "web_listener_started")
+	assertEventPresent(t, events, "raw_mumble_listener_started")
+	assertEventPresent(t, events, "udp_disabled")
+	assertEventPresent(t, events, "runtime_ready")
+
+	if got := eventField(t, events, "udp_disabled", "listener"); got != "udp" {
+		t.Fatalf("expected udp_disabled listener=udp, got %q", got)
+	}
+	if got := eventField(t, events, "udp_disabled", "mode"); got != "teamlancer" {
+		t.Fatalf("expected udp_disabled mode=teamlancer, got %q", got)
+	}
+}
+
+func TestTeamlancerLifecycleShutdownEventOrder(t *testing.T) {
+	server, cleanup := newTeamlancerTestServer(t, true)
+	defer cleanup()
+
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	server.Logger = logger
+
+	if err := server.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	markRuntimeReady(logger)
+
+	if err := server.Stop(); err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	assertEventOrder(t, events,
+		"runtime_stopping",
+		"readiness_false",
+		"listeners_closed",
+		"runtime_stopped",
+	)
+}
+
+func TestTeamlancerNoUDPStartupContract(t *testing.T) {
+	server, cleanup := newTeamlancerTestServer(t, true)
+	defer cleanup()
+
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	server.Logger = logger
+
+	if err := server.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer func() {
+		if err := server.Stop(); err != nil {
+			t.Fatalf("stop failed: %v", err)
+		}
+	}()
+
+	if server.udpconn != nil {
+		t.Fatal("expected udp listener to remain nil")
+	}
+
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	for _, event := range events {
+		if strings.Contains(event["event"], "udp") && event["event"] != "udp_disabled" {
+			t.Fatalf("expected no udp startup event other than udp_disabled, got %q", event["event"])
+		}
+	}
+	assertEventPresent(t, events, "udp_disabled")
 }
 
 func TestServerStopIsSafeWithNilListenersAndRepeatedCalls(t *testing.T) {
@@ -177,6 +269,7 @@ func newTeamlancerTestServer(t *testing.T, enableRawTCP bool) (*Server, func()) 
 		RawMumbleTCPPort:        rawPort,
 		EnableRawMumbleTCP:      enableRawTCP,
 		EnableUDP:               false,
+		LogFormat:               "json",
 		HealthPath:              "/health",
 		ReadinessPath:           "/ready",
 		DataDir:                 tempDir,
@@ -211,4 +304,57 @@ func reserveTCPPort(t *testing.T) int {
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+func lifecycleEventsFromBuffer(t *testing.T, raw string) []map[string]string {
+	t.Helper()
+
+	lines := strings.Split(raw, "\n")
+	events := make([]map[string]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var event map[string]string
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode structured event %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func assertEventPresent(t *testing.T, events []map[string]string, want string) {
+	t.Helper()
+	for _, event := range events {
+		if event["event"] == want {
+			return
+		}
+	}
+	t.Fatalf("expected event %q in %+v", want, events)
+}
+
+func eventField(t *testing.T, events []map[string]string, wantEvent, wantField string) string {
+	t.Helper()
+	for _, event := range events {
+		if event["event"] == wantEvent {
+			return event[wantField]
+		}
+	}
+	t.Fatalf("expected event %q in %+v", wantEvent, events)
+	return ""
+}
+
+func assertEventOrder(t *testing.T, events []map[string]string, want ...string) {
+	t.Helper()
+	pos := 0
+	for _, event := range events {
+		if pos < len(want) && event["event"] == want[pos] {
+			pos++
+		}
+	}
+	if pos != len(want) {
+		t.Fatalf("expected event order %v in %+v", want, events)
+	}
 }

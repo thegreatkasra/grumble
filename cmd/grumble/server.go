@@ -74,7 +74,7 @@ type Server struct {
 	webhttp    *http.Server
 	bye        chan bool
 	netwg      sync.WaitGroup
-	running    bool
+	running    atomic.Bool
 	totalConns atomic.Int64
 	ipConns    map[string]int
 
@@ -91,7 +91,8 @@ type Server struct {
 	cfg *serverconf.Config
 
 	// Clients
-	clients map[uint32]*Client
+	clientmu sync.RWMutex
+	clients  map[uint32]*Client
 
 	// Host, host/port -> client mapping
 	hmutex    sync.Mutex
@@ -99,6 +100,7 @@ type Server struct {
 	hpclients map[string]*Client
 
 	// Codec information
+	codecmu          sync.Mutex
 	AlphaCodec       int32
 	BetaCodec        int32
 	PreferAlphaCodec bool
@@ -355,7 +357,9 @@ func (server *Server) RemoveClient(client *Client, kicked bool) {
 	}
 	server.hmutex.Unlock()
 
+	server.clientmu.Lock()
 	delete(server.clients, client.Session())
+	server.clientmu.Unlock()
 	server.pool.Reclaim(client.Session())
 
 	// Remove client from channel
@@ -426,7 +430,7 @@ func (server *Server) handlerLoop() {
 		case vb := <-server.voicebroadcast:
 			if vb.target == 0 { // Current channel
 				channel := vb.client.Channel
-				for _, client := range channel.clients {
+				for _, client := range channel.ClientsSnapshot() {
 					if client != vb.client {
 						err := client.SendUDP(vb.buf)
 						if err != nil {
@@ -600,7 +604,7 @@ func (server *Server) finishAuthenticate(client *Client) {
 	// previous client and let the new guy in.
 	if client.user != nil {
 		found := false
-		for _, connectedClient := range server.clients {
+		for _, connectedClient := range server.clientsSnapshot() {
 			if connectedClient.UserId() == client.UserId() {
 				found = true
 				break
@@ -617,7 +621,7 @@ func (server *Server) finishAuthenticate(client *Client) {
 	}
 
 	// Add the client to the connected list
-	server.clients[client.Session()] = client
+	server.setClient(client)
 
 	// Warn clients without CELT support that they might not be able to talk to everyone else.
 	if len(client.codecs) == 0 {
@@ -732,6 +736,10 @@ func (server *Server) finishAuthenticate(client *Client) {
 }
 
 func (server *Server) updateCodecVersions(connecting *Client) {
+	server.codecmu.Lock()
+	defer server.codecmu.Unlock()
+
+	connectedClients := server.clientsSnapshot()
 	codecusers := map[int32]int{}
 	var (
 		winner     int32
@@ -744,7 +752,7 @@ func (server *Server) updateCodecVersions(connecting *Client) {
 		}
 	)
 
-	for _, client := range server.clients {
+	for _, client := range connectedClients {
 		users++
 		if client.opus {
 			opus++
@@ -807,7 +815,7 @@ func (server *Server) updateCodecVersions(connecting *Client) {
 	}
 
 	if server.Opus {
-		for _, client := range server.clients {
+		for _, client := range connectedClients {
 			if !client.opus && client.state == StateClientReady {
 				txtMsg.Session = []uint32{connecting.Session()}
 				err := client.sendMessage(txtMsg)
@@ -827,7 +835,7 @@ func (server *Server) updateCodecVersions(connecting *Client) {
 }
 
 func (server *Server) sendUserList(client *Client) {
-	for _, connectedClient := range server.clients {
+	for _, connectedClient := range server.clientsSnapshot() {
 		if connectedClient.state != StateClientReady {
 			continue
 		}
@@ -922,7 +930,7 @@ func (server *Server) sendClientPermissions(client *Client, channel *Channel) {
 type ClientPredicate func(client *Client) bool
 
 func (server *Server) broadcastProtoMessageWithPredicate(msg interface{}, clientcheck ClientPredicate) error {
-	for _, client := range server.clients {
+	for _, client := range server.clientsSnapshot() {
 		if !clientcheck(client) {
 			continue
 		}
@@ -1031,7 +1039,7 @@ func (server *Server) udpListenLoop() {
 			buffer := bytes.NewBuffer(make([]byte, 0, 24))
 			_ = binary.Write(buffer, binary.BigEndian, uint32((1<<16)|(2<<8)|2))
 			_ = binary.Write(buffer, binary.BigEndian, rand)
-			_ = binary.Write(buffer, binary.BigEndian, uint32(len(server.clients)))
+			_ = binary.Write(buffer, binary.BigEndian, uint32(server.clientCount()))
 			_ = binary.Write(buffer, binary.BigEndian, server.cfg.Uint32Value("MaxUsers"))
 			_ = binary.Write(buffer, binary.BigEndian, server.cfg.Uint32Value("MaxBandwidth"))
 
@@ -1100,7 +1108,7 @@ func (server *Server) handleUdpPacket(udpaddr *net.UDPAddr, buf []byte) {
 
 // ClearCaches clears the Server's caches
 func (server *Server) ClearCaches() {
-	for _, client := range server.clients {
+	for _, client := range server.clientsSnapshot() {
 		client.ClearCaches()
 	}
 }
@@ -1231,7 +1239,7 @@ func (server *Server) RemoveChannel(channel *Channel) {
 	}
 
 	// Remove all clients
-	for _, client := range channel.clients {
+	for _, client := range channel.ClientsSnapshot() {
 		target := channel.parent
 		for target.parent != nil && !acl.HasPermission(&target.ACL, client, acl.EnterPermission) {
 			target = target.parent
@@ -1460,17 +1468,6 @@ func (server *Server) initPerLaunchData() {
 // Clean per-launch data
 func (server *Server) cleanPerLaunchData() {
 	server.pool = nil
-	server.clients = nil
-	server.hclients = nil
-	server.hpclients = nil
-	server.ipConns = nil
-
-	server.bye = nil
-	server.incoming = nil
-	server.voicebroadcast = nil
-	server.cfgUpdate = nil
-	server.tempRemove = nil
-	server.clientAuthenticated = nil
 }
 
 // Port returns the port the native server will listen on when it is
@@ -1512,7 +1509,7 @@ func (server *Server) WebPort() int {
 // on.  If called when the server is not running,
 // this function returns -1.
 func (server *Server) CurrentPort() int {
-	if !server.running || server.tcpl == nil {
+	if !server.running.Load() || server.tcpl == nil {
 		return -1
 	}
 	tcpaddr := server.tcpl.Addr().(*net.TCPAddr)
@@ -1535,7 +1532,7 @@ func (server *Server) HostAddress() string {
 
 // Start the server.
 func (server *Server) Start() (err error) {
-	if server.running {
+	if server.running.Load() {
 		return errors.New("already running")
 	}
 
@@ -1623,12 +1620,15 @@ func (server *Server) Start() (err error) {
 			WriteTimeout: 10 * time.Second,
 			IdleTimeout:  2 * time.Minute,
 		}
+		webServer := server.webhttp
+		webListener := server.webtcpl
+		teamlancerMode := runtimeConfig.TeamlancerMode
 		go func() {
 			var err error
-			if runtimeConfig.TeamlancerMode {
-				err = server.webhttp.Serve(server.webtcpl)
+			if teamlancerMode {
+				err = webServer.Serve(webListener)
 			} else {
-				err = server.webhttp.ServeTLS(server.webtcpl, "", "")
+				err = webServer.ServeTLS(webListener, "", "")
 			}
 			if err != http.ErrServerClosed {
 				emitStructuredEvent(server.Logger, "error", "listener_error", map[string]string{
@@ -1645,13 +1645,17 @@ func (server *Server) Start() (err error) {
 	}
 	if server.tcpl != nil {
 		runtimeState.SetCheck("rawMumbleTcpListener", "ok")
-		emitStructuredEvent(server.Logger, "info", "raw_tcp_listener_started", map[string]string{
+		emitStructuredEvent(server.Logger, "info", "raw_mumble_listener_started", map[string]string{
 			"listener_type": "raw_tcp",
 		})
 	}
 	if runtimeConfig.TeamlancerMode {
 		if !enableUDP {
 			runtimeState.SetCheck("udp", "disabled")
+			emitStructuredEvent(server.Logger, "info", "udp_disabled", map[string]string{
+				"mode":     "teamlancer",
+				"listener": "udp",
+			})
 		}
 		if server.tcpl != nil && shouldListenWeb {
 			server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webtcpl.Addr())
@@ -1666,7 +1670,7 @@ func (server *Server) Start() (err error) {
 		server.Printf("Started: listening on %v", server.tcpl.Addr())
 	}
 
-	server.running = true
+	server.running.Store(true)
 
 	// Open a fresh freezer log
 	err = server.openFreezeLog()
@@ -1721,18 +1725,22 @@ func (server *Server) Start() (err error) {
 
 // Stop the server.
 func (server *Server) Stop() (err error) {
-	if !server.running {
+	if !server.running.Load() {
 		return nil
 	}
 	emitStructuredEvent(server.Logger, "info", "runtime_stopping", map[string]string{
 		"listener_type": "runtime",
 	})
 	runtimeState.MarkShuttingDown()
+	emitStructuredEvent(server.Logger, "info", "readiness_false", map[string]string{
+		"mode":     "teamlancer",
+		"listener": "runtime",
+	})
 
 	// Stop the handler goroutine and disconnect all
 	// clients
 	server.bye <- true
-	for _, client := range server.clients {
+	for _, client := range server.clientsSnapshot() {
 		client.Disconnect()
 	}
 
@@ -1781,6 +1789,10 @@ func (server *Server) Stop() (err error) {
 			return err
 		}
 	}
+	emitStructuredEvent(server.Logger, "info", "listeners_closed", map[string]string{
+		"mode":     "teamlancer",
+		"listener": "runtime",
+	})
 
 	// Since we'll (on some OSes) have to wait for the network
 	// goroutines to end, we might as well use the time to store
@@ -1806,7 +1818,7 @@ func (server *Server) Stop() (err error) {
 	}
 
 	server.cleanPerLaunchData()
-	server.running = false
+	server.running.Store(false)
 	server.webtcpl = nil
 	server.Printf("Stopped")
 	emitStructuredEvent(server.Logger, "info", "runtime_stopped", map[string]string{
@@ -1814,6 +1826,36 @@ func (server *Server) Stop() (err error) {
 	})
 
 	return nil
+}
+
+func (server *Server) clientCount() int {
+	server.clientmu.RLock()
+	defer server.clientmu.RUnlock()
+	return len(server.clients)
+}
+
+func (server *Server) clientsSnapshot() []*Client {
+	server.clientmu.RLock()
+	defer server.clientmu.RUnlock()
+
+	clients := make([]*Client, 0, len(server.clients))
+	for _, client := range server.clients {
+		clients = append(clients, client)
+	}
+	return clients
+}
+
+func (server *Server) getClient(session uint32) (*Client, bool) {
+	server.clientmu.RLock()
+	defer server.clientmu.RUnlock()
+	client, ok := server.clients[session]
+	return client, ok
+}
+
+func (server *Server) setClient(client *Client) {
+	server.clientmu.Lock()
+	defer server.clientmu.Unlock()
+	server.clients[client.Session()] = client
 }
 
 // Set will set a configuration value

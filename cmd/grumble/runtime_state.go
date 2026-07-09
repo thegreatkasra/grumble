@@ -48,6 +48,17 @@ func (s *appRuntimeState) MarkShuttingDown() {
 	s.shuttingDown.Store(1)
 }
 
+func (s *appRuntimeState) ChecksSnapshot() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	checks := make(map[string]string, len(s.checks))
+	for k, v := range s.checks {
+		checks[k] = v
+	}
+	return checks
+}
+
 func (s *appRuntimeState) IsReady() bool {
 	if s.started.Load() != 1 || s.shuttingDown.Load() != 0 {
 		return false
@@ -96,17 +107,14 @@ func (s *appRuntimeState) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
+	checks := s.ChecksSnapshot()
 	if !s.IsReady() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "starting"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"status": "not_ready",
+			"checks": checks,
+		})
 		return
 	}
-
-	s.mu.RLock()
-	checks := make(map[string]string, len(s.checks))
-	for k, v := range s.checks {
-		checks[k] = v
-	}
-	s.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "ready",

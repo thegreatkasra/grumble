@@ -217,10 +217,7 @@ func main() {
 			})
 			log.Printf("Unable to start server %v: %v", server.Id, err.Error())
 		} else if runtimeConfig.TeamlancerMode {
-			runtimeState.MarkReady()
-			emitStructuredEvent(log.Default(), "info", "runtime_ready", map[string]string{
-				"listener_type": "runtime",
-			})
+			markRuntimeReady(log.Default())
 		}
 	}
 

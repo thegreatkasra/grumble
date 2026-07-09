@@ -87,7 +87,7 @@ func (server *Server) RegisterPublicServer() {
 		Location: server.cfg.StringValue("RegisterLocation"),
 		Port:     server.CurrentPort(),
 		Digest:   digest,
-		Users:    len(server.clients),
+		Users:    server.clientCount(),
 		Channels: len(server.Channels),
 		Version:  "1.2.4",
 		Release:  "Grumble Git",

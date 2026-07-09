@@ -27,6 +27,9 @@ func TestVerifyDataDirWritableWithUnwritableDirectory(t *testing.T) {
 		}
 		return
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permission checks")
+	}
 
 	cfg := RuntimeConfig{DataDir: filepath.Join(tempDir, "readonly")}
 	if err := os.MkdirAll(cfg.DataDir, 0o500); err != nil {

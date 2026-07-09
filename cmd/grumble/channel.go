@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/hex"
+	"sync"
 
 	"mumble.info/grumble/pkg/acl"
 )
@@ -17,6 +18,7 @@ type Channel struct {
 	Position int
 
 	temporary bool
+	mu        sync.RWMutex
 	clients   map[uint32]*Client
 	parent    *Channel
 	children  map[int]*Channel
@@ -58,14 +60,30 @@ func (channel *Channel) RemoveChild(child *Channel) {
 
 // AddClient adds client
 func (channel *Channel) AddClient(client *Client) {
+	channel.mu.Lock()
+	defer channel.mu.Unlock()
 	channel.clients[client.Session()] = client
 	client.Channel = channel
 }
 
 // RemoveClient removes client
 func (channel *Channel) RemoveClient(client *Client) {
+	channel.mu.Lock()
+	defer channel.mu.Unlock()
 	delete(channel.clients, client.Session())
 	client.Channel = nil
+}
+
+// ClientsSnapshot returns a stable view of the current channel members.
+func (channel *Channel) ClientsSnapshot() []*Client {
+	channel.mu.RLock()
+	defer channel.mu.RUnlock()
+
+	clients := make([]*Client, 0, len(channel.clients))
+	for _, client := range channel.clients {
+		clients = append(clients, client)
+	}
+	return clients
 }
 
 // HasDescription Does the channel have a description?
@@ -128,5 +146,7 @@ func (channel *Channel) IsTemporary() bool {
 
 // IsEmpty checks whether the channel is temporary
 func (channel *Channel) IsEmpty() bool {
+	channel.mu.RLock()
+	defer channel.mu.RUnlock()
 	return len(channel.clients) == 0
 }

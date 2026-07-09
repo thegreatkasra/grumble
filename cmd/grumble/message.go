@@ -489,7 +489,7 @@ func (server *Server) handleUserRemoveMessage(client *Client, msg *Message) {
 	}
 
 	// Get the client to be removed.
-	removeClient, ok := server.clients[*userremove.Session]
+	removeClient, ok := server.getClient(*userremove.Session)
 	if !ok {
 		client.Panic("Invalid session in UserRemove message")
 		return
@@ -553,14 +553,14 @@ func (server *Server) handleUserStateMessage(client *Client, msg *Message) {
 		return
 	}
 
-	actor, ok := server.clients[client.Session()]
+	actor, ok := server.getClient(client.Session())
 	if !ok {
 		server.Panic("Client not found in server's client map.")
 		return
 	}
 	target := actor
 	if userstate.Session != nil {
-		target, ok = server.clients[*userstate.Session]
+		target, ok = server.getClient(*userstate.Session)
 		if !ok {
 			client.Panic("Invalid session in UserState message")
 			return
@@ -983,7 +983,7 @@ func (server *Server) handleTextMessage(client *Client, msg *Message) {
 				client.sendPermissionDenied(client, channel, acl.TextMessagePermission)
 				return
 			}
-			for _, target := range channel.clients {
+			for _, target := range channel.ClientsSnapshot() {
 				clients[target.Session()] = target
 			}
 		}
@@ -996,7 +996,7 @@ func (server *Server) handleTextMessage(client *Client, msg *Message) {
 				client.sendPermissionDenied(client, channel, acl.TextMessagePermission)
 				return
 			}
-			for _, target := range channel.clients {
+			for _, target := range channel.ClientsSnapshot() {
 				clients[target.Session()] = target
 			}
 		}
@@ -1004,7 +1004,7 @@ func (server *Server) handleTextMessage(client *Client, msg *Message) {
 
 	// Direct-to-clients
 	for _, session := range txtmsg.Session {
-		if target, ok := server.clients[session]; ok {
+		if target, ok := server.getClient(session); ok {
 			if !acl.HasPermission(&target.Channel.ACL, client, acl.TextMessagePermission) {
 				client.sendPermissionDenied(client, target.Channel, acl.TextMessagePermission)
 				return
@@ -1293,7 +1293,7 @@ func (server *Server) handleUserStatsMessage(client *Client, msg *Message) {
 		return
 	}
 
-	target, exists := server.clients[*stats.Session]
+	target, exists := server.getClient(*stats.Session)
 	if !exists {
 		return
 	}
@@ -1470,7 +1470,7 @@ func (server *Server) handleRequestBlob(client *Client, msg *Message) {
 	// Request for user textures
 	if len(blobreq.SessionTexture) > 0 {
 		for _, sid := range blobreq.SessionTexture {
-			if target, ok := server.clients[sid]; ok {
+			if target, ok := server.getClient(sid); ok {
 				if target.user == nil {
 					continue
 				}
@@ -1495,7 +1495,7 @@ func (server *Server) handleRequestBlob(client *Client, msg *Message) {
 	// Request for user comments
 	if len(blobreq.SessionComment) > 0 {
 		for _, sid := range blobreq.SessionComment {
-			if target, ok := server.clients[sid]; ok {
+			if target, ok := server.getClient(sid); ok {
 				if target.user == nil {
 					continue
 				}

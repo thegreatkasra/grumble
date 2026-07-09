@@ -75,7 +75,7 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 
 			if !vtc.subChannels && !vtc.links && vtc.onlyGroup == "" {
 				if acl.HasPermission(&channel.ACL, client, acl.WhisperPermission) {
-					for _, target := range channel.clients {
+					for _, target := range channel.ClientsSnapshot() {
 						fromChannels[target.Session()] = target
 					}
 				}
@@ -95,7 +95,7 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 				}
 				for _, newchan := range newchans {
 					if acl.HasPermission(&newchan.ACL, client, acl.WhisperPermission) {
-						for _, target := range newchan.clients {
+						for _, target := range newchan.ClientsSnapshot() {
 							if vtc.onlyGroup == "" || acl.GroupMemberCheck(&newchan.ACL, &newchan.ACL, vtc.onlyGroup, target) {
 								fromChannels[target.Session()] = target
 							}
@@ -106,8 +106,8 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 		}
 
 		for _, session := range vt.sessions {
-			target := server.clients[session]
-			if target != nil {
+			target, ok := server.getClient(session)
+			if ok {
 				if _, alreadyInFromChannels := fromChannels[target.Session()]; !alreadyInFromChannels {
 					direct[target.Session()] = target
 				}
