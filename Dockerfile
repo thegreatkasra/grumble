@@ -1,28 +1,32 @@
-FROM golang:1.14-alpine as builder
+FROM golang:1.23.8-alpine3.20 AS builder
 
-COPY . /go/src/mumble.info/grumble
+WORKDIR /src
 
-WORKDIR /go/src/mumble.info/grumble
+RUN apk add --no-cache ca-certificates git
 
-RUN apk add --no-cache git build-base
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 
-RUN go get -v -t ./... \
-  && go build mumble.info/grumble/cmd/grumble \
-  && go test -v ./...
+COPY . .
 
-FROM alpine:edge
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/grumble ./cmd/grumble
 
-COPY --from=builder /go/bin/grumble /usr/bin/grumble
+FROM alpine:3.20
 
-ENV DATADIR /data
-
-RUN mkdir /data
+RUN addgroup -S grumble && adduser -S -G grumble -h /data grumble \
+    && apk add --no-cache ca-certificates \
+    && mkdir -p /data \
+    && chown -R grumble:grumble /data
 
 WORKDIR /data
+COPY --from=builder /out/grumble /usr/local/bin/grumble
 
-VOLUME /data
+USER grumble
 
+ENV DATA_DIR=/data
+
+VOLUME ["/data"]
+EXPOSE 7880/tcp
 EXPOSE 64738/tcp
-EXPOSE 64738/udp
 
-ENTRYPOINT [ "/usr/bin/grumble", "--datadir", "/data", "--log", "/data/grumble.log" ]
+ENTRYPOINT ["/usr/local/bin/grumble","--datadir","/data"]

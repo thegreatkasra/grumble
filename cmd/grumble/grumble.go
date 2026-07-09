@@ -28,19 +28,29 @@ func main() {
 		return
 	}
 
-	// Open the data dir to check whether it exists.
-	dataDir, err := os.Open(Args.DataDir)
+	runtimeConfig, err = LoadRuntimeConfig()
 	if err != nil {
-		log.Fatalf("Unable to open data directory (%v): %v", Args.DataDir, err)
-		return
+		log.Fatalf("Invalid runtime configuration: %v", err)
 	}
+	Args.DataDir = runtimeConfig.DataDir
+
+	// Open the data dir to check whether it exists.
+	if err := runtimeConfig.VerifyDataDirWritable(); err != nil {
+		log.Fatalf("Unable to initialize data directory (%v): %v", Args.DataDir, err)
+	}
+	runtimeState.SetCheck("dataDirectory", "ok")
+	dataDir, err := os.Open(Args.DataDir)
 	dataDir.Close()
 
 	// Set up logging
-	logtarget.Default, err = logtarget.OpenFile(Args.LogPath, os.Stderr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to open log file (%v): %v", Args.LogPath, err)
-		return
+	if runtimeConfig.TeamlancerMode {
+		logtarget.Default = logtarget.OpenWriters(os.Stdout, os.Stderr)
+	} else {
+		logtarget.Default, err = logtarget.OpenFile(Args.LogPath, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Unable to open log file (%v): %v", Args.LogPath, err)
+			return
+		}
 	}
 	log.SetPrefix("[G] ")
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -66,48 +76,46 @@ func main() {
 	// These are used as the default certificate of all virtual servers
 	// and the SSH admin console, but can be overridden using the "key"
 	// and "cert" arguments to Grumble.
-	certFn := filepath.Join(Args.DataDir, "cert.pem")
-	keyFn := filepath.Join(Args.DataDir, "key.pem")
-	shouldRegen := false
-	if Args.RegenKeys {
-		shouldRegen = true
-	} else {
-		// OK. Here's the idea:  We check for the existence of the cert.pem
-		// and key.pem files in the data directory on launch. Although these
-		// might be deleted later (and this check could be deemed useless),
-		// it's simply here to be convenient for admins.
-		hasKey := true
-		hasCert := true
-		_, err = os.Stat(certFn)
-		if err != nil && os.IsNotExist(err) {
-			hasCert = false
-		}
-		_, err = os.Stat(keyFn)
-		if err != nil && os.IsNotExist(err) {
-			hasKey = false
-		}
-		if !hasCert && !hasKey {
+	if !runtimeConfig.TeamlancerMode || runtimeConfig.EnableRawMumbleTCP {
+		certFn := filepath.Join(Args.DataDir, "cert.pem")
+		keyFn := filepath.Join(Args.DataDir, "key.pem")
+		shouldRegen := false
+		if Args.RegenKeys {
 			shouldRegen = true
-		} else if !hasCert || !hasKey {
-			if !hasCert {
-				log.Fatal("Grumble could not find its default certificate (cert.pem)")
+		} else {
+			hasKey := true
+			hasCert := true
+			_, err = os.Stat(certFn)
+			if err != nil && os.IsNotExist(err) {
+				hasCert = false
 			}
-			if !hasKey {
-				log.Fatal("Grumble could not find its default private key (key.pem)")
+			_, err = os.Stat(keyFn)
+			if err != nil && os.IsNotExist(err) {
+				hasKey = false
+			}
+			if !hasCert && !hasKey {
+				shouldRegen = true
+			} else if !hasCert || !hasKey {
+				if !hasCert {
+					log.Fatal("Grumble could not find its default certificate (cert.pem)")
+				}
+				if !hasKey {
+					log.Fatal("Grumble could not find its default private key (key.pem)")
+				}
 			}
 		}
-	}
-	if shouldRegen {
-		log.Printf("Generating 4096-bit RSA keypair for self-signed certificate...")
+		if shouldRegen {
+			log.Printf("Generating 4096-bit RSA keypair for self-signed certificate...")
 
-		err := GenerateSelfSignedCert(certFn, keyFn)
-		if err != nil {
-			log.Printf("Error: %v", err)
-			return
+			err := GenerateSelfSignedCert(certFn, keyFn)
+			if err != nil {
+				log.Printf("Error: %v", err)
+				return
+			}
+
+			log.Printf("Certificate output to %v", certFn)
+			log.Printf("Private key output to %v", keyFn)
 		}
-
-		log.Printf("Certificate output to %v", certFn)
-		log.Printf("Private key output to %v", keyFn)
 	}
 
 	// Should we import data from a Murmur SQLite file?
@@ -174,8 +182,10 @@ func main() {
 	// Look through the list of files in the data directory, and
 	// load all virtual servers from disk.
 	servers = make(map[int64]*Server)
+	serverCount := 0
 	for _, name := range names {
 		if matched, _ := regexp.MatchString("^[0-9]+$", name); matched {
+			serverCount++
 			log.Printf("Loading server %v", name)
 			s, err := NewServerFromFrozen(name)
 			if err != nil {
@@ -187,6 +197,9 @@ func main() {
 			}
 			servers[s.Id] = s
 		}
+	}
+	if runtimeConfig.TeamlancerMode && serverCount > 1 {
+		log.Fatal("Teamlancer mode requires exactly one active virtual server")
 	}
 
 	// If no servers were found, create the default virtual server.
@@ -203,12 +216,18 @@ func main() {
 			log.Fatalf("Unable to freeze newly created server to disk: %v", err.Error())
 		}
 	}
+	if runtimeConfig.TeamlancerMode && len(servers) != 1 {
+		log.Fatal("Teamlancer mode requires exactly one active virtual server")
+	}
+	runtimeState.SetCheck("virtualServer", "ok")
 
 	// Launch the servers we found during launch...
 	for _, server := range servers {
 		err = server.Start()
 		if err != nil {
 			log.Printf("Unable to start server %v: %v", server.Id, err.Error())
+		} else if runtimeConfig.TeamlancerMode {
+			runtimeState.MarkReady()
 		}
 	}
 

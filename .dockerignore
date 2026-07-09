@@ -1,0 +1,9 @@
+.git
+.github
+bin
+dist
+coverage*
+*.log
+*.out
+Dockerfile.arm32v6
+README.md

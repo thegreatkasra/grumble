@@ -97,3 +97,51 @@ services:
     volumes:
       - $HOME/.grumble:/data
 ```
+
+Teamlancer Hamravesh Deployment
+===============================
+
+Stage 1 runs Grumble as a single-replica Hamravesh workload with exactly two TCP listeners:
+
+- `0.0.0.0:7880/tcp` for plain HTTP inside the container: `/health`, `/ready`, `/connect`
+- `0.0.0.0:64738/tcp` for raw Mumble TCP/TLS
+
+Hamravesh terminates public TLS for `https://live.teamlancer.work` and `wss://live.teamlancer.work/connect`. The container must not terminate TLS on port `7880`. Raw Mumble on `64738` keeps its own TLS.
+
+Required runtime environment:
+
+```env
+TEAMLANCER_MODE=true
+WEB_BIND_ADDRESS=0.0.0.0
+WEB_PORT=7880
+ENABLE_WEB=true
+WEBSOCKET_PATH=/connect
+RAW_MUMBLE_TCP_BIND_ADDRESS=0.0.0.0
+RAW_MUMBLE_TCP_PORT=64738
+ENABLE_RAW_MUMBLE_TCP=true
+ENABLE_UDP=false
+HEALTH_PATH=/health
+READINESS_PATH=/ready
+DATA_DIR=/data
+LOG_LEVEL=info
+LOG_FORMAT=json
+ALLOWED_ORIGINS=https://teamlancer.work,https://app.teamlancer.work
+ENABLE_PUBLIC_WEBSOCKET=false
+```
+
+Hamravesh application contract:
+
+- Repository: `grumble`
+- App: `teamlancer-livekit`
+- Domain: `live.teamlancer.work`
+- Port `main`: TCP, container `7880`, cluster `7880`, current external mapping `26177`
+- Port `mumble-tcp`: TCP, container `64738`, cluster `64738`, current external mapping `26237`
+- UDP: not configured
+- Replica count: `1`
+
+Notes:
+
+- External ports are infrastructure mappings and must not be hard-coded.
+- Browser audio remains on Mumble `UDPTunnel` over the stream path.
+- Public WebSocket stays disabled by default until Stage 2 ticket authentication exists.
+- Horizontal scaling is not supported in this stage.

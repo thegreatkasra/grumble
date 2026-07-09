@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -40,6 +41,7 @@ import (
 const DefaultPort = 64738
 const DefaultWebPort = 443
 const UDPPacketSize = 1024
+var ErrUDPDisabled = errors.New("udp is disabled")
 
 const LogOpsBeforeSync = 100
 const CeltCompatBitstream = -2147483637
@@ -67,11 +69,12 @@ type Server struct {
 	udpconn   *net.UDPConn
 	tlscfg    *tls.Config
 	webwsl    *web.Listener
-	webtlscfg *tls.Config
 	webhttp   *http.Server
 	bye       chan bool
 	netwg     sync.WaitGroup
 	running   bool
+	totalConns atomic.Int64
+	ipConns    map[string]int
 
 	incoming       chan *Message
 	voicebroadcast chan *VoiceBroadcast
@@ -324,6 +327,7 @@ func (server *Server) handleIncomingClient(conn net.Conn) (err error) {
 // RemoveClient removes a disconnected client from the server's
 // internal representation.
 func (server *Server) RemoveClient(client *Client, kicked bool) {
+	server.releaseReservedConnection(client.conn.RemoteAddr())
 	server.hmutex.Lock()
 	host := client.tcpaddr.IP.String()
 	oldclients := server.hclients[host]
@@ -974,6 +978,9 @@ func (server *Server) handleIncomingMessage(client *Client, msg *Message) {
 
 // Send the content of buf as a UDP packet to addr.
 func (s *Server) SendUDP(buf []byte, addr *net.UDPAddr) (err error) {
+	if s.udpconn == nil {
+		return ErrUDPDisabled
+	}
 	_, err = s.udpconn.WriteTo(buf, addr)
 	return
 }
@@ -981,11 +988,17 @@ func (s *Server) SendUDP(buf []byte, addr *net.UDPAddr) (err error) {
 // Listen for and handle UDP packets.
 func (server *Server) udpListenLoop() {
 	defer server.netwg.Done()
+	if server.udpconn == nil {
+		return
+	}
 
 	buf := make([]byte, UDPPacketSize)
 	for {
 		nread, remote, err := server.udpconn.ReadFrom(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			if isTimeout(err) {
 				continue
 			} else {
@@ -1326,15 +1339,68 @@ func (server *Server) acceptLoop(listener net.Listener) {
 			}
 			continue
 		}
+		if !server.reserveConnection(conn.RemoteAddr()) {
+			server.Printf("Rejected client %v: connection limit exceeded", conn.RemoteAddr())
+			_ = conn.Close()
+			continue
+		}
 
 		// Create a new client connection from our *tls.Conn
 		// which wraps net.TCPConn.
 		err = server.handleIncomingClient(conn)
 		if err != nil {
+			server.releaseReservedConnection(conn.RemoteAddr())
 			server.Printf("Unable to handle new client: %v", err)
 			continue
 		}
 	}
+}
+
+func (server *Server) reserveConnection(addr net.Addr) bool {
+	if !runtimeConfig.TeamlancerMode {
+		return true
+	}
+	host := hostFromAddr(addr)
+	server.hmutex.Lock()
+	defer server.hmutex.Unlock()
+	if int(server.totalConns.Load()) >= runtimeConfig.MaxConnections {
+		return false
+	}
+	if server.ipConns[host] >= runtimeConfig.MaxConnectionsPerIP {
+		return false
+	}
+	server.totalConns.Add(1)
+	server.ipConns[host]++
+	return true
+}
+
+func (server *Server) releaseReservedConnection(addr net.Addr) {
+	if !runtimeConfig.TeamlancerMode {
+		return
+	}
+	host := hostFromAddr(addr)
+	server.hmutex.Lock()
+	defer server.hmutex.Unlock()
+	if server.ipConns[host] > 0 {
+		server.ipConns[host]--
+		if server.ipConns[host] == 0 {
+			delete(server.ipConns, host)
+		}
+	}
+	if server.totalConns.Load() > 0 {
+		server.totalConns.Add(-1)
+	}
+}
+
+func hostFromAddr(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err == nil {
+		return host
+	}
+	return addr.String()
 }
 
 // The isTimeout function checks whether a
@@ -1352,6 +1418,7 @@ func (server *Server) initPerLaunchData() {
 	server.clients = make(map[uint32]*Client)
 	server.hclients = make(map[string][]*Client)
 	server.hpclients = make(map[string]*Client)
+	server.ipConns = make(map[string]int)
 
 	server.bye = make(chan bool)
 	server.incoming = make(chan *Message)
@@ -1367,6 +1434,7 @@ func (server *Server) cleanPerLaunchData() {
 	server.clients = nil
 	server.hclients = nil
 	server.hpclients = nil
+	server.ipConns = nil
 
 	server.bye = nil
 	server.incoming = nil
@@ -1379,6 +1447,9 @@ func (server *Server) cleanPerLaunchData() {
 // Port returns the port the native server will listen on when it is
 // started.
 func (server *Server) Port() int {
+	if runtimeConfig.TeamlancerMode {
+		return runtimeConfig.RawMumbleTCPPort
+	}
 	port := server.cfg.IntValue("Port")
 	if port == 0 {
 		return DefaultPort + int(server.Id) - 1
@@ -1389,12 +1460,18 @@ func (server *Server) Port() int {
 // ListenWebPort returns true if we should listen to the
 // web port, otherwise false
 func (server *Server) ListenWebPort() bool {
+	if runtimeConfig.TeamlancerMode {
+		return runtimeConfig.EnableWeb
+	}
 	return !server.cfg.BoolValue("NoWebServer")
 }
 
 // WebPort returns the port the web server will listen on when it is
 // started.
 func (server *Server) WebPort() int {
+	if runtimeConfig.TeamlancerMode {
+		return runtimeConfig.WebPort
+	}
 	port := server.cfg.IntValue("WebPort")
 	if port == 0 {
 		return DefaultWebPort + int(server.Id) - 1
@@ -1406,7 +1483,7 @@ func (server *Server) WebPort() int {
 // on.  If called when the server is not running,
 // this function returns -1.
 func (server *Server) CurrentPort() int {
-	if !server.running {
+	if !server.running || server.tcpl == nil {
 		return -1
 	}
 	tcpaddr := server.tcpl.Addr().(*net.TCPAddr)
@@ -1417,6 +1494,9 @@ func (server *Server) CurrentPort() int {
 // it is started. This must be an IP address, either IPv4
 // or IPv6.
 func (server *Server) HostAddress() string {
+	if runtimeConfig.TeamlancerMode {
+		return runtimeConfig.RawMumbleTCPBindAddress
+	}
 	host := server.cfg.StringValue("Address")
 	if host == "" {
 		return "0.0.0.0"
@@ -1434,77 +1514,96 @@ func (server *Server) Start() (err error) {
 	port := server.Port()
 	webport := server.WebPort()
 	shouldListenWeb := server.ListenWebPort()
-
-	// Setup our UDP listener
-	server.udpconn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(host), Port: port})
-	if err != nil {
-		return err
+	enableUDP := true
+	if runtimeConfig.TeamlancerMode {
+		host = runtimeConfig.RawMumbleTCPBindAddress
+		port = runtimeConfig.RawMumbleTCPPort
+		webport = runtimeConfig.WebPort
+		shouldListenWeb = runtimeConfig.EnableWeb
+		enableUDP = runtimeConfig.EnableUDP
 	}
-	/*
-		err = server.udpconn.SetReadTimeout(1e9)
+
+	if enableUDP {
+		server.udpconn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(host), Port: port})
 		if err != nil {
 			return err
 		}
-	*/
+	}
 
 	// Set up our TCP connection
-	server.tcpl, err = net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(host), Port: port})
-	if err != nil {
-		return err
-	}
-	/*
-		err = server.tcpl.SetTimeout(1e9)
+	if runtimeConfig.TeamlancerMode && !runtimeConfig.EnableRawMumbleTCP {
+		server.Printf("Started Teamlancer web listener only")
+	} else {
+		server.tcpl, err = net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(host), Port: port})
 		if err != nil {
 			return err
 		}
-	*/
-
-	// Wrap a TLS listener around the TCP connection
-	certFn := filepath.Join(Args.DataDir, "cert.pem")
-	keyFn := filepath.Join(Args.DataDir, "key.pem")
-	cert, err := tls.LoadX509KeyPair(certFn, keyFn)
-	if err != nil {
-		return err
+		certFn := filepath.Join(Args.DataDir, "cert.pem")
+		keyFn := filepath.Join(Args.DataDir, "key.pem")
+		cert, err := tls.LoadX509KeyPair(certFn, keyFn)
+		if err != nil {
+			return err
+		}
+		server.tlscfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   tls.RequestClientCert,
+		}
+		server.tlsl = tls.NewListener(server.tcpl, server.tlscfg)
 	}
-	server.tlscfg = &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequestClientCert,
-	}
-	server.tlsl = tls.NewListener(server.tcpl, server.tlscfg)
 
 	if shouldListenWeb {
-		// Create HTTP server and WebSocket "listener"
-		webaddr := &net.TCPAddr{IP: net.ParseIP(host), Port: webport}
-		server.webtlscfg = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ClientAuth:   tls.NoClientCert,
-			NextProtos:   []string{"http/1.1"},
+		webhost := host
+		if runtimeConfig.TeamlancerMode {
+			webhost = runtimeConfig.WebBindAddress
 		}
-		server.webwsl = web.NewListener(webaddr, server.Logger)
+		webaddr := &net.TCPAddr{IP: net.ParseIP(webhost), Port: webport}
+		server.webwsl = newWebListener(server.Logger)
 		mux := http.NewServeMux()
-		mux.Handle("/", server.webwsl)
+		if runtimeConfig.TeamlancerMode {
+			mux.HandleFunc(runtimeConfig.HealthPath, runtimeState.HealthHandler)
+			mux.HandleFunc(runtimeConfig.ReadinessPath, runtimeState.ReadyHandler)
+			mux.Handle(runtimeConfig.WebSocketPath, server.webwsl)
+		} else {
+			mux.Handle("/", server.webwsl)
+		}
 		server.webhttp = &http.Server{
-			Addr:      webaddr.String(),
-			Handler:   mux,
-			TLSConfig: server.webtlscfg,
-			ErrorLog:  server.Logger,
-
-			// Set sensible timeouts, in case no reverse proxy is in front of Grumble.
-			// Non-conforming (or malicious) clients may otherwise block indefinitely and cause
-			// file descriptors (or handles, depending on your OS) to leak and/or be exhausted
+			Addr:         webaddr.String(),
+			Handler:      mux,
+			ErrorLog:     server.Logger,
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 10 * time.Second,
 			IdleTimeout:  2 * time.Minute,
 		}
 		go func() {
-			err := server.webhttp.ListenAndServeTLS("", "")
+			var err error
+			if runtimeConfig.TeamlancerMode {
+				err = server.webhttp.ListenAndServe()
+			} else {
+				err = server.webhttp.ListenAndServeTLS("", "")
+			}
 			if err != http.ErrServerClosed {
 				server.Fatalf("Fatal HTTP server error: %v", err)
 			}
 		}()
-
+		runtimeState.SetCheck("webListener", "ok")
+	}
+	if server.tcpl != nil {
+		runtimeState.SetCheck("rawMumbleTcpListener", "ok")
+	}
+	if runtimeConfig.TeamlancerMode {
+		if !enableUDP {
+			runtimeState.SetCheck("udp", "disabled")
+		}
+		if server.tcpl != nil && shouldListenWeb {
+			server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webwsl.Addr())
+		} else if server.tcpl != nil {
+			server.Printf("Started: listening on %v", server.tcpl.Addr())
+		} else if shouldListenWeb {
+			server.Printf("Started: listening on %v", server.webwsl.Addr())
+		}
+	} else if shouldListenWeb {
 		server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webwsl.Addr())
-	} else {
+	} else if server.tcpl != nil {
 		server.Printf("Started: listening on %v", server.tcpl.Addr())
 	}
 
@@ -1530,14 +1629,24 @@ func (server *Server) Start() (err error) {
 	// for the servers. Each network goroutine defers a call to
 	// netwg.Done(). In the Stop() we close all the connections
 	// and call netwg.Wait() to wait for the goroutines to end.
-	numWG := 2
+	numWG := 0
+	if enableUDP {
+		numWG++
+	}
+	if server.tlsl != nil {
+		numWG++
+	}
 	if shouldListenWeb {
 		numWG++
 	}
 
 	server.netwg.Add(numWG)
-	go server.udpListenLoop()
-	go server.acceptLoop(server.tlsl)
+	if enableUDP {
+		go server.udpListenLoop()
+	}
+	if server.tlsl != nil {
+		go server.acceptLoop(server.tlsl)
+	}
 	if shouldListenWeb {
 		go server.acceptLoop(server.webwsl)
 	}
@@ -1556,6 +1665,7 @@ func (server *Server) Stop() (err error) {
 	if !server.running {
 		return errors.New("server not running")
 	}
+	runtimeState.MarkShuttingDown()
 
 	// Stop the handler goroutine and disconnect all
 	// clients
@@ -1569,32 +1679,38 @@ func (server *Server) Stop() (err error) {
 	// never letting the HTTP connection go idle, so we give 15 seconds of grace time.
 	// This does not apply to opened WebSockets, which were forcibly closed when
 	// all clients were disconnected.
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(15*time.Second))
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(runtimeConfig.ShutdownTimeout))
+	defer cancel()
 	if server.ListenWebPort() {
 		err = server.webhttp.Shutdown(ctx)
-		cancel()
 		if err == context.DeadlineExceeded {
 			server.Println("Forcibly shutdown HTTP server while stopping")
 		} else if err != nil {
 			return err
 		}
 
-		err = server.webwsl.Close()
-		if err != nil {
-			return err
+		if server.webwsl != nil {
+			err = server.webwsl.Close()
+			if err != nil && !errors.Is(err, net.ErrClosed) {
+				return err
+			}
 		}
 	}
 
 	// Close the listeners
-	err = server.tlsl.Close()
-	if err != nil {
-		return err
+	if server.tlsl != nil {
+		err = server.tlsl.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 
 	// Close the UDP connection
-	err = server.udpconn.Close()
-	if err != nil {
-		return err
+	if server.udpconn != nil {
+		err = server.udpconn.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 
 	// Since we'll (on some OSes) have to wait for the network
