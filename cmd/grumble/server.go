@@ -41,6 +41,7 @@ import (
 const DefaultPort = 64738
 const DefaultWebPort = 443
 const UDPPacketSize = 1024
+
 var ErrUDPDisabled = errors.New("udp is disabled")
 
 const LogOpsBeforeSync = 100
@@ -64,16 +65,16 @@ type KeyValuePair struct {
 type Server struct {
 	Id int64
 
-	tcpl      *net.TCPListener
-	tlsl      net.Listener
-	udpconn   *net.UDPConn
-	tlscfg    *tls.Config
-	webwsl    *web.Listener
-	webtcpl   *net.TCPListener
-	webhttp   *http.Server
-	bye       chan bool
-	netwg     sync.WaitGroup
-	running   bool
+	tcpl       *net.TCPListener
+	tlsl       net.Listener
+	udpconn    *net.UDPConn
+	tlscfg     *tls.Config
+	webwsl     *web.Listener
+	webtcpl    *net.TCPListener
+	webhttp    *http.Server
+	bye        chan bool
+	netwg      sync.WaitGroup
+	running    bool
 	totalConns atomic.Int64
 	ipConns    map[string]int
 
@@ -275,6 +276,16 @@ func (server *Server) handleIncomingClient(conn net.Conn) (err error) {
 
 	client.lf = &clientLogForwarder{client, server.Logger}
 	client.Logger = log.New(client.lf, "", 0)
+	client.connectionID, client.remoteIP, client.listenerType = connectionMetadata(conn)
+	if client.connectionID == "" {
+		client.connectionID = nextConnectionID("conn")
+	}
+	if client.remoteIP == "" {
+		client.remoteIP = hostFromRemoteAddr(addr)
+	}
+	if client.listenerType == "" {
+		client.listenerType = "raw_tcp"
+	}
 
 	client.session = server.pool.Get()
 	client.Printf("New connection: %v (%v)", conn.RemoteAddr(), client.Session())
@@ -294,7 +305,7 @@ func (server *Server) handleIncomingClient(conn net.Conn) (err error) {
 	// Extract user's cert hash
 	// Only consider client certificates for direct connections, not WebSocket connections.
 	// We do not support TLS-level client certificates for WebSocket client.
-	if tlsconn, ok := client.conn.(*tls.Conn); ok {
+	if tlsconn, ok := unwrapTLSConn(client.conn); ok {
 		err = tlsconn.Handshake()
 		if err != nil {
 			client.Printf("TLS handshake failed: %v", err)
@@ -1339,6 +1350,29 @@ func (server *Server) acceptLoop(listener net.Listener) {
 			_ = conn.Close()
 			continue
 		}
+		connectionID, remoteIP, listenerType := connectionMetadata(conn)
+		if connectionID == "" {
+			connectionID = nextConnectionID("conn")
+		}
+		if remoteIP == "" {
+			remoteIP = hostFromRemoteAddr(conn.RemoteAddr())
+		}
+		if listenerType == "" {
+			listenerType = "raw_tcp"
+		}
+		if listenerType == "raw_tcp" {
+			emitStructuredEvent(server.Logger, "info", "raw_tcp_accepted", map[string]string{
+				"connection_id": connectionID,
+				"remote_ip":     remoteIP,
+				"listener_type": listenerType,
+			})
+		}
+		conn = &trackedConn{
+			Conn:         conn,
+			connectionID: connectionID,
+			remoteIP:     remoteIP,
+			listenerType: listenerType,
+		}
 
 		// Create a new client connection from our *tls.Conn
 		// which wraps net.TCPConn.
@@ -1521,6 +1555,10 @@ func (server *Server) Start() (err error) {
 	if enableUDP {
 		server.udpconn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(host), Port: port})
 		if err != nil {
+			emitStructuredEvent(server.Logger, "error", "listener_error", map[string]string{
+				"listener_type": "udp",
+				"reason":        err.Error(),
+			})
 			return err
 		}
 	}
@@ -1531,12 +1569,20 @@ func (server *Server) Start() (err error) {
 	} else {
 		server.tcpl, err = net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(host), Port: port})
 		if err != nil {
+			emitStructuredEvent(server.Logger, "error", "listener_error", map[string]string{
+				"listener_type": "raw_tcp",
+				"reason":        err.Error(),
+			})
 			return err
 		}
 		certFn := filepath.Join(Args.DataDir, "cert.pem")
 		keyFn := filepath.Join(Args.DataDir, "key.pem")
 		cert, err := tls.LoadX509KeyPair(certFn, keyFn)
 		if err != nil {
+			emitStructuredEvent(server.Logger, "error", "persistence_error", map[string]string{
+				"listener_type": "raw_tcp",
+				"reason":        err.Error(),
+			})
 			return err
 		}
 		server.tlscfg = &tls.Config{
@@ -1554,6 +1600,10 @@ func (server *Server) Start() (err error) {
 		webaddr := &net.TCPAddr{IP: net.ParseIP(webhost), Port: webport}
 		server.webtcpl, err = net.ListenTCP("tcp", webaddr)
 		if err != nil {
+			emitStructuredEvent(server.Logger, "error", "listener_error", map[string]string{
+				"listener_type": "web",
+				"reason":        err.Error(),
+			})
 			return err
 		}
 		server.webwsl = newWebListener(server.Logger)
@@ -1581,13 +1631,23 @@ func (server *Server) Start() (err error) {
 				err = server.webhttp.ServeTLS(server.webtcpl, "", "")
 			}
 			if err != http.ErrServerClosed {
+				emitStructuredEvent(server.Logger, "error", "listener_error", map[string]string{
+					"listener_type": "web",
+					"reason":        err.Error(),
+				})
 				server.Fatalf("Fatal HTTP server error: %v", err)
 			}
 		}()
 		runtimeState.SetCheck("webListener", "ok")
+		emitStructuredEvent(server.Logger, "info", "web_listener_started", map[string]string{
+			"listener_type": "web",
+		})
 	}
 	if server.tcpl != nil {
 		runtimeState.SetCheck("rawMumbleTcpListener", "ok")
+		emitStructuredEvent(server.Logger, "info", "raw_tcp_listener_started", map[string]string{
+			"listener_type": "raw_tcp",
+		})
 	}
 	if runtimeConfig.TeamlancerMode {
 		if !enableUDP {
@@ -1664,6 +1724,9 @@ func (server *Server) Stop() (err error) {
 	if !server.running {
 		return nil
 	}
+	emitStructuredEvent(server.Logger, "info", "runtime_stopping", map[string]string{
+		"listener_type": "runtime",
+	})
 	runtimeState.MarkShuttingDown()
 
 	// Stop the handler goroutine and disconnect all
@@ -1724,6 +1787,10 @@ func (server *Server) Stop() (err error) {
 	// a full server freeze to disk.
 	err = server.FreezeToFile()
 	if err != nil {
+		emitStructuredEvent(server.Logger, "error", "persistence_error", map[string]string{
+			"listener_type": "runtime",
+			"reason":        err.Error(),
+		})
 		server.Fatal(err)
 	}
 
@@ -1742,6 +1809,9 @@ func (server *Server) Stop() (err error) {
 	server.running = false
 	server.webtcpl = nil
 	server.Printf("Stopped")
+	emitStructuredEvent(server.Logger, "info", "runtime_stopped", map[string]string{
+		"listener_type": "runtime",
+	})
 
 	return nil
 }

@@ -93,6 +93,47 @@ func TestRuntimeConfigRejectsInvalidOriginEntries(t *testing.T) {
 	}
 }
 
+func TestAllowedOriginMatrix(t *testing.T) {
+	runtimeConfig = RuntimeConfig{
+		AllowDevelopmentOrigins: false,
+		AllowedOrigins: []Origin{
+			{Scheme: "https", Host: "teamlancer.work"},
+		},
+	}
+
+	cases := []struct {
+		name   string
+		origin string
+		want   bool
+	}{
+		{name: "allowed production origin", origin: "https://teamlancer.work", want: true},
+		{name: "blocked origin", origin: "https://blocked.teamlancer.work", want: false},
+		{name: "wrong scheme", origin: "http://teamlancer.work", want: false},
+		{name: "wrong port", origin: "https://teamlancer.work:8443", want: false},
+		{name: "missing origin", origin: "", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAllowedOrigin(tc.origin); got != tc.want {
+				t.Fatalf("expected %v for %q, got %v", tc.want, tc.origin, got)
+			}
+		})
+	}
+}
+
+func TestAllowedOriginAllowsLocalhostInDevelopmentMode(t *testing.T) {
+	runtimeConfig = RuntimeConfig{
+		AllowDevelopmentOrigins: true,
+		AllowedOrigins: []Origin{
+			{Scheme: "http", Host: "localhost:3000"},
+		},
+	}
+	if !isAllowedOrigin("http://localhost:3000") {
+		t.Fatal("expected localhost development origin to be allowed")
+	}
+}
+
 func TestRuntimeConfigRejectsInvalidLimitsAndTimeouts(t *testing.T) {
 	cfg := validRuntimeConfigForTests()
 	cfg.WSMaxMessageBytes = 0

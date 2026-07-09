@@ -13,7 +13,6 @@ import (
 	"log"
 	"math/big"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -56,8 +55,7 @@ func GenerateSelfSignedCert(certpath, keypath string) (err error) {
 		Bytes: keybuf,
 	}
 
-	certfn := filepath.Join(Args.DataDir, "cert.pem")
-	file, err := os.OpenFile(certfn, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
+	file, err := os.OpenFile(certpath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
 	if err != nil {
 		return err
 	}
@@ -67,8 +65,7 @@ func GenerateSelfSignedCert(certpath, keypath string) (err error) {
 		return err
 	}
 
-	keyfn := filepath.Join(Args.DataDir, "key.pem")
-	file, err = os.OpenFile(keyfn, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
+	file, err = os.OpenFile(keypath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
 	if err != nil {
 		return err
 	}

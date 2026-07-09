@@ -4,41 +4,159 @@ on:
   push:
     branches:
       - master
-
   pull_request:
     branches:
       - master
-
   workflow_dispatch:
 
-
 jobs:
-  build:
+  verify:
+    name: Verify modules
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23.8'
+          go-version-file: go.mod
 
       - name: Verify modules
         run: go mod verify
 
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Unit tests
         run: go test ./...
 
+  race:
+    name: Race tests
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Race tests
-        env:
-          CGO_ENABLED: 1
         run: go test -race ./...
+
+  vet:
+    name: Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
       - name: Vet
         run: go vet ./...
 
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Build
         run: go build ./...
 
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Docker build
         run: docker build -t teamlancer-grumble-ci .
+
+      - name: Docker smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d \
+            -p 17880:7880 \
+            -p 16473:64738 \
+            -e TEAMLANCER_MODE=true \
+            -e WEB_BIND_ADDRESS=0.0.0.0 \
+            -e WEB_PORT=7880 \
+            -e ENABLE_WEB=true \
+            -e WEBSOCKET_PATH=/connect \
+            -e RAW_MUMBLE_TCP_BIND_ADDRESS=0.0.0.0 \
+            -e RAW_MUMBLE_TCP_PORT=64738 \
+            -e ENABLE_RAW_MUMBLE_TCP=true \
+            -e ENABLE_UDP=false \
+            -e HEALTH_PATH=/health \
+            -e READINESS_PATH=/ready \
+            -e DATA_DIR=/data \
+            -e LOG_LEVEL=info \
+            -e LOG_FORMAT=json \
+            -e ALLOWED_ORIGINS=https://teamlancer.work,https://app.teamlancer.work \
+            -e ENABLE_PUBLIC_WEBSOCKET=false \
+            teamlancer-grumble-ci)"
+          trap 'docker logs "$cid"; docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+          if [ "$(docker exec "$cid" id -u)" = "0" ]; then
+            echo "container is running as root"
+            exit 1
+          fi
+
+          docker exec "$cid" sh -lc 'test -w /data && touch /data/.smoke && rm /data/.smoke'
+
+          for attempt in $(seq 1 30); do
+            health_code="$(curl -sS -o /tmp/health.json -w "%{http_code}" http://127.0.0.1:17880/health || true)"
+            ready_code="$(curl -sS -o /tmp/ready.json -w "%{http_code}" http://127.0.0.1:17880/ready || true)"
+            if [ "$health_code" = "200" ] && [ "$ready_code" = "200" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          health_code="$(curl -sS -o /tmp/health.json -w "%{http_code}" http://127.0.0.1:17880/health)"
+          ready_code="$(curl -sS -o /tmp/ready.json -w "%{http_code}" http://127.0.0.1:17880/ready)"
+
+          echo "health_status=$health_code"
+          cat /tmp/health.json
+          echo
+          echo "ready_status=$ready_code"
+          cat /tmp/ready.json
+          echo
+
+          test "$health_code" = "200"
+          test "$ready_code" = "200"
+
+      - name: CI artifact report
+        shell: bash
+        run: |
+          echo "Go version: $(go version)"
+          echo "Docker version: $(docker version --format '{{.Server.Version}}')"
+          echo "Listener mode: Teamlancer Voice Engine"
+          echo "Environment summary:"
+          echo "  TEAMLANCER_MODE=true"
+          echo "  WEB=0.0.0.0:7880"
+          echo "  RAW_MUMBLE_TCP=0.0.0.0:64738"
+          echo "  UDP=disabled"
+          echo "  HEALTH_PATH=/health"
+          echo "  READINESS_PATH=/ready"
+          echo "  WEBSOCKET_PATH=/connect"
+          echo "  ENABLE_PUBLIC_WEBSOCKET=false"

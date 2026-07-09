@@ -25,11 +25,11 @@ type appRuntimeState struct {
 func newAppRuntimeState() *appRuntimeState {
 	s := &appRuntimeState{}
 	s.checks = map[string]string{
-		"dataDirectory":       "starting",
-		"webListener":         "starting",
+		"dataDirectory":        "starting",
+		"webListener":          "starting",
 		"rawMumbleTcpListener": "starting",
-		"udp":                 "disabled",
-		"virtualServer":       "starting",
+		"udp":                  "disabled",
+		"virtualServer":        "starting",
 	}
 	return s
 }
@@ -154,5 +154,8 @@ func newWebListener(logger *log.Logger) *web.Listener {
 		PingInterval:      pingInterval,
 		ValidateOrigin:    validateOrigin,
 		RequiredProtocols: []string{"mumble", "binary"},
+		LogEvent: func(level, event string, fields map[string]string) {
+			emitStructuredEvent(logger, level, event, fields)
+		},
 	})
 }

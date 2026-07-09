@@ -30,12 +30,23 @@ func main() {
 
 	runtimeConfig, err = LoadRuntimeConfig()
 	if err != nil {
+		emitBootstrapEvent("error", "configuration_invalid", map[string]string{
+			"listener_type": "runtime",
+			"reason":        err.Error(),
+		})
 		log.Fatalf("Invalid runtime configuration: %v", err)
 	}
 	Args.DataDir = runtimeConfig.DataDir
+	emitStructuredEvent(log.Default(), "info", "runtime_starting", map[string]string{
+		"listener_type": "runtime",
+	})
 
 	// Open the data dir to check whether it exists.
 	if err := runtimeConfig.VerifyDataDirWritable(); err != nil {
+		emitStructuredEvent(log.Default(), "error", "persistence_error", map[string]string{
+			"listener_type": "runtime",
+			"reason":        err.Error(),
+		})
 		log.Fatalf("Unable to initialize data directory (%v): %v", Args.DataDir, err)
 	}
 	runtimeState.SetCheck("dataDirectory", "ok")
@@ -76,43 +87,18 @@ func main() {
 	// These are used as the default certificate of all virtual servers
 	// and the SSH admin console, but can be overridden using the "key"
 	// and "cert" arguments to Grumble.
-	if !runtimeConfig.TeamlancerMode || runtimeConfig.EnableRawMumbleTCP {
-		certFn := filepath.Join(Args.DataDir, "cert.pem")
-		keyFn := filepath.Join(Args.DataDir, "key.pem")
-		shouldRegen := false
-		if Args.RegenKeys {
-			shouldRegen = true
-		} else {
-			hasKey := true
-			hasCert := true
-			_, err = os.Stat(certFn)
-			if err != nil && os.IsNotExist(err) {
-				hasCert = false
-			}
-			_, err = os.Stat(keyFn)
-			if err != nil && os.IsNotExist(err) {
-				hasKey = false
-			}
-			if !hasCert && !hasKey {
-				shouldRegen = true
-			} else if !hasCert || !hasKey {
-				if !hasCert {
-					log.Fatal("Grumble could not find its default certificate (cert.pem)")
-				}
-				if !hasKey {
-					log.Fatal("Grumble could not find its default private key (key.pem)")
-				}
-			}
+	if shouldManageRuntimeCertificate(runtimeConfig) {
+		certFn, keyFn := runtimeCertificatePaths(Args.DataDir)
+		certState, err := ensureRuntimeCertificate(Args.DataDir, Args.RegenKeys)
+		if err != nil {
+			emitStructuredEvent(log.Default(), "error", "persistence_error", map[string]string{
+				"listener_type": "raw_tcp",
+				"reason":        err.Error(),
+			})
+			log.Fatal(err)
 		}
-		if shouldRegen {
+		if certState == "generated" {
 			log.Printf("Generating 4096-bit RSA keypair for self-signed certificate...")
-
-			err := GenerateSelfSignedCert(certFn, keyFn)
-			if err != nil {
-				log.Printf("Error: %v", err)
-				return
-			}
-
 			log.Printf("Certificate output to %v", certFn)
 			log.Printf("Private key output to %v", keyFn)
 		}
@@ -225,9 +211,16 @@ func main() {
 	for _, server := range servers {
 		err = server.Start()
 		if err != nil {
+			emitStructuredEvent(log.Default(), "error", "listener_error", map[string]string{
+				"listener_type": "runtime",
+				"reason":        err.Error(),
+			})
 			log.Printf("Unable to start server %v: %v", server.Id, err.Error())
 		} else if runtimeConfig.TeamlancerMode {
 			runtimeState.MarkReady()
+			emitStructuredEvent(log.Default(), "info", "runtime_ready", map[string]string{
+				"listener_type": "runtime",
+			})
 		}
 	}
 

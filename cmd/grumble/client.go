@@ -7,7 +7,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -30,12 +29,15 @@ type Client struct {
 	lf *clientLogForwarder
 
 	// Connection-related
-	tcpaddr *net.TCPAddr
-	udpaddr *net.UDPAddr
-	conn    net.Conn
-	reader  *bufio.Reader
-	state   int
-	server  *Server
+	tcpaddr      *net.TCPAddr
+	udpaddr      *net.UDPAddr
+	conn         net.Conn
+	reader       *bufio.Reader
+	state        int
+	server       *Server
+	connectionID string
+	remoteIP     string
+	listenerType string
 
 	udprecv chan []byte
 
@@ -154,7 +156,10 @@ func (client *Client) ShownName() string {
 // IsVerified checks whether the client's certificate is
 // verified.
 func (client *Client) IsVerified() bool {
-	tlsconn := client.conn.(*tls.Conn)
+	tlsconn, ok := unwrapTLSConn(client.conn)
+	if !ok {
+		return false
+	}
 	state := tlsconn.ConnectionState()
 	return len(state.VerifiedChains) > 0
 }
@@ -192,6 +197,11 @@ func (client *Client) disconnect(kicked bool) {
 		}
 
 		client.Printf("Disconnected")
+		emitStructuredEvent(client.server.Logger, "info", "connection_closed", map[string]string{
+			"connection_id": client.connectionID,
+			"remote_ip":     client.remoteIP,
+			"listener_type": client.listenerType,
+		})
 		client.conn.Close()
 
 		client.server.updateCodecVersions(nil)

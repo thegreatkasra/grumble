@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+var connectionSeq atomic.Uint64
 
 type OriginValidator func(originHeader string) bool
 
@@ -28,6 +31,7 @@ type ListenerConfig struct {
 	PingInterval      time.Duration
 	ValidateOrigin    OriginValidator
 	RequiredProtocols []string
+	LogEvent          func(level, event string, fields map[string]string)
 }
 
 type Listener struct {
@@ -40,6 +44,23 @@ type Listener struct {
 	mu      sync.Mutex
 	conns   map[*conn]struct{}
 	closeWg sync.WaitGroup
+}
+
+type socketConn interface {
+	SetReadLimit(limit int64)
+	SetReadDeadline(t time.Time) error
+	SetPongHandler(h func(string) error)
+	NextReader() (int, io.Reader, error)
+	SetWriteDeadline(t time.Time) error
+	WriteMessage(messageType int, data []byte) error
+	Close() error
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	WriteControl(messageType int, data []byte, deadline time.Time) error
+}
+
+type gorillaSocket struct {
+	*websocket.Conn
 }
 
 func NewListener(cfg ListenerConfig) *Listener {
@@ -111,10 +132,20 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !l.cfg.Enabled {
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"remote_ip":     remoteHost(r.RemoteAddr),
+			"listener_type": "websocket",
+			"reason":        "listener disabled",
+		})
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
 	}
 	if !websocket.IsWebSocketUpgrade(r) {
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"remote_ip":     remoteHost(r.RemoteAddr),
+			"listener_type": "websocket",
+			"reason":        "upgrade required",
+		})
 		w.Header().Set("Upgrade", "websocket")
 		http.Error(w, http.StatusText(http.StatusUpgradeRequired), http.StatusUpgradeRequired)
 		return
@@ -122,12 +153,22 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	protocol := negotiateSubprotocol(r.Header.Get("Sec-WebSocket-Protocol"), l.cfg.RequiredProtocols)
 	if protocol == "" {
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"remote_ip":     remoteHost(r.RemoteAddr),
+			"listener_type": "websocket",
+			"reason":        "subprotocol negotiation failed",
+		})
 		http.Error(w, "websocket subprotocol negotiation failed", http.StatusBadRequest)
 		return
 	}
 
 	ws, err := l.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"remote_ip":     remoteHost(r.RemoteAddr),
+			"listener_type": "websocket",
+			"reason":        err.Error(),
+		})
 		l.cfg.Logger.Printf("event=websocket_upgrade_failed remoteIp=%q err=%q", remoteHost(r.RemoteAddr), err.Error())
 		return
 	}
@@ -135,11 +176,17 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = ws.Close()
 		return
 	}
-	conn := newConn(ws, l.cfg, func(c *conn) {
+	connectionID := nextConnectionID()
+	conn := newConn(gorillaSocket{ws}, l.cfg, func(c *conn) {
 		l.mu.Lock()
 		delete(l.conns, c)
 		l.mu.Unlock()
 		l.closeWg.Done()
+	}, connectionID)
+	l.logEvent("info", "websocket_accepted", map[string]string{
+		"connection_id": connectionID,
+		"remote_ip":     conn.RemoteIP(),
+		"listener_type": "websocket",
 	})
 
 	l.mu.Lock()
@@ -151,13 +198,20 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case l.sockets <- conn:
 	default:
 		l.cfg.Logger.Printf("event=websocket_accept_queue_full remoteIp=%q capacity=%d", remoteHost(r.RemoteAddr), l.cfg.AcceptQueueSize)
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"connection_id": connectionID,
+			"remote_ip":     conn.RemoteIP(),
+			"listener_type": "websocket",
+			"reason":        "accept queue full",
+		})
 		_ = conn.Close()
 	}
 }
 
 type conn struct {
-	ws           *websocket.Conn
+	ws           socketConn
 	cfg          ListenerConfig
+	connectionID string
 	closeOnce    sync.Once
 	writeMu      sync.Mutex
 	readMu       sync.Mutex
@@ -174,12 +228,13 @@ type ioReader interface {
 	Read([]byte) (int, error)
 }
 
-func newConn(ws *websocket.Conn, cfg ListenerConfig, onClose func(*conn)) *conn {
+func newConn(ws socketConn, cfg ListenerConfig, onClose func(*conn), connectionID string) *conn {
 	c := &conn{
-		ws:       ws,
-		cfg:      cfg,
-		onClose:  onClose,
-		pingStop: make(chan struct{}),
+		ws:           ws,
+		cfg:          cfg,
+		connectionID: connectionID,
+		onClose:      onClose,
+		pingStop:     make(chan struct{}),
 	}
 	ws.SetReadLimit(cfg.MaxMessageBytes)
 	_ = ws.SetReadDeadline(time.Now().Add(cfg.IdleTimeout))
@@ -249,6 +304,9 @@ func (c *conn) Close() error {
 
 func (c *conn) LocalAddr() net.Addr  { return c.ws.LocalAddr() }
 func (c *conn) RemoteAddr() net.Addr { return c.ws.RemoteAddr() }
+func (c *conn) ConnectionID() string { return c.connectionID }
+func (c *conn) RemoteIP() string     { return remoteHost(c.ws.RemoteAddr().String()) }
+func (c *conn) ListenerType() string { return "websocket" }
 
 func (c *conn) SetDeadline(t time.Time) error {
 	if err := c.SetReadDeadline(t); err != nil {
@@ -322,4 +380,14 @@ func remoteHost(remote string) string {
 		return remote
 	}
 	return host
+}
+
+func nextConnectionID() string {
+	return strconv.FormatUint(connectionSeq.Add(1), 10)
+}
+
+func (l *Listener) logEvent(level, event string, fields map[string]string) {
+	if l.cfg.LogEvent != nil {
+		l.cfg.LogEvent(level, event, fields)
+	}
 }
