@@ -2,25 +2,43 @@ name: CI
 
 on:
   push:
+    branches:
+      - master
+
   pull_request:
+    branches:
+      - master
+
+  workflow_dispatch:
+
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.8'
+
       - name: Verify modules
         run: go mod verify
+
       - name: Unit tests
         run: go test ./...
+
       - name: Race tests
+        env:
+          CGO_ENABLED: 1
         run: go test -race ./...
+
       - name: Vet
         run: go vet ./...
+
       - name: Build
         run: go build ./...
+
       - name: Docker build
-        run: docker build .
+        run: docker build -t teamlancer-grumble-ci .
