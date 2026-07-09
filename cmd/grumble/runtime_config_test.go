@@ -1,6 +1,8 @@
 package main
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,6 +115,57 @@ func TestRuntimeConfigRejectsUDPInTeamlancerMode(t *testing.T) {
 	}
 }
 
+func TestLoadRuntimeConfigRejectsMalformedValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{name: "bool", key: "TEAMLANCER_MODE", value: "maybe", want: "TEAMLANCER_MODE"},
+		{name: "port", key: "WEB_PORT", value: "abc", want: "WEB_PORT"},
+		{name: "udp bool", key: "ENABLE_UDP", value: "yes-please", want: "ENABLE_UDP"},
+		{name: "message size", key: "WS_MAX_MESSAGE_BYTES", value: "-5", want: "WS_MAX_MESSAGE_BYTES"},
+		{name: "duration", key: "WS_IDLE_TIMEOUT_SECONDS", value: "zero", want: "WS_IDLE_TIMEOUT_SECONDS"},
+		{name: "connection limit", key: "MAX_CONNECTIONS", value: "0", want: "MAX_CONNECTIONS"},
+		{name: "origins", key: "ALLOWED_ORIGINS", value: "invalid", want: "invalid origin"},
+		{name: "ip", key: "WEB_BIND_ADDRESS", value: "not-an-ip", want: "WEB_BIND_ADDRESS"},
+		{name: "path", key: "DATA_DIR", value: "relative/path", want: "DATA_DIR"},
+		{name: "queue", key: "WS_ACCEPT_QUEUE_SIZE", value: "0", want: "WS_ACCEPT_QUEUE_SIZE"},
+		{name: "shutdown", key: "SHUTDOWN_TIMEOUT_SECONDS", value: "0", want: "SHUTDOWN_TIMEOUT_SECONDS"},
+		{name: "dev origins bool", key: "ALLOW_DEVELOPMENT_ORIGINS", value: "invalid", want: "ALLOW_DEVELOPMENT_ORIGINS"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setValidRuntimeEnv(t)
+			t.Setenv(tc.key, tc.value)
+
+			_, err := LoadRuntimeConfig()
+			if err == nil {
+				t.Fatalf("expected %s to fail", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error %q to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRuntimeConfigUsesDefaultsWhenEnvAbsent(t *testing.T) {
+	Args.DataDir = filepath.Clean(defaultDataDir())
+	cfg, err := LoadRuntimeConfig()
+	if err != nil {
+		t.Fatalf("expected defaults to load, got %v", err)
+	}
+	if cfg.WebPort != 7880 {
+		t.Fatalf("expected default web port, got %d", cfg.WebPort)
+	}
+	if cfg.EnableUDP {
+		t.Fatal("expected UDP to default disabled")
+	}
+}
+
 func validRuntimeConfigForTests() RuntimeConfig {
 	return RuntimeConfig{
 		WebBindAddress:          "0.0.0.0",
@@ -134,4 +187,32 @@ func validRuntimeConfigForTests() RuntimeConfig {
 		MaxConnectionsPerIP: 1,
 		ShutdownTimeout:     1 * time.Second,
 	}
+}
+
+func setValidRuntimeEnv(t *testing.T) {
+	t.Helper()
+	Args.DataDir = filepath.Clean(defaultDataDir())
+	t.Setenv("TEAMLANCER_MODE", "true")
+	t.Setenv("WEB_BIND_ADDRESS", "0.0.0.0")
+	t.Setenv("WEB_PORT", "7880")
+	t.Setenv("ENABLE_WEB", "true")
+	t.Setenv("WEBSOCKET_PATH", "/connect")
+	t.Setenv("RAW_MUMBLE_TCP_BIND_ADDRESS", "0.0.0.0")
+	t.Setenv("RAW_MUMBLE_TCP_PORT", "64738")
+	t.Setenv("ENABLE_RAW_MUMBLE_TCP", "true")
+	t.Setenv("ENABLE_UDP", "false")
+	t.Setenv("HEALTH_PATH", "/health")
+	t.Setenv("READINESS_PATH", "/ready")
+	t.Setenv("DATA_DIR", filepath.Clean(defaultDataDir()))
+	t.Setenv("ALLOWED_ORIGINS", "https://teamlancer.work,https://app.teamlancer.work")
+	t.Setenv("ALLOW_DEVELOPMENT_ORIGINS", "false")
+	t.Setenv("WS_MAX_MESSAGE_BYTES", "1048576")
+	t.Setenv("WS_ACCEPT_QUEUE_SIZE", "128")
+	t.Setenv("WS_IDLE_TIMEOUT_SECONDS", "90")
+	t.Setenv("WS_WRITE_TIMEOUT_SECONDS", "15")
+	t.Setenv("WS_PING_INTERVAL_SECONDS", "30")
+	t.Setenv("MAX_CONNECTIONS", "1000")
+	t.Setenv("MAX_CONNECTIONS_PER_IP", "20")
+	t.Setenv("SHUTDOWN_TIMEOUT_SECONDS", "20")
+	t.Setenv("ENABLE_PUBLIC_WEBSOCKET", "false")
 }

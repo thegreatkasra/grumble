@@ -69,6 +69,7 @@ type Server struct {
 	udpconn   *net.UDPConn
 	tlscfg    *tls.Config
 	webwsl    *web.Listener
+	webtcpl   *net.TCPListener
 	webhttp   *http.Server
 	bye       chan bool
 	netwg     sync.WaitGroup
@@ -905,12 +906,6 @@ func (server *Server) sendClientPermissions(client *Client, channel *Channel) {
 
 	// fixme(mkrautz): re-add when we have ACL caching
 	return
-
-	perm := acl.Permission(acl.NonePermission)
-	client.sendMessage(&mumbleproto.PermissionQuery{
-		ChannelId:   proto.Uint32(uint32(channel.Id)),
-		Permissions: proto.Uint32(uint32(perm)),
-	})
 }
 
 type ClientPredicate func(client *Client) bool
@@ -1557,6 +1552,10 @@ func (server *Server) Start() (err error) {
 			webhost = runtimeConfig.WebBindAddress
 		}
 		webaddr := &net.TCPAddr{IP: net.ParseIP(webhost), Port: webport}
+		server.webtcpl, err = net.ListenTCP("tcp", webaddr)
+		if err != nil {
+			return err
+		}
 		server.webwsl = newWebListener(server.Logger)
 		mux := http.NewServeMux()
 		if runtimeConfig.TeamlancerMode {
@@ -1577,9 +1576,9 @@ func (server *Server) Start() (err error) {
 		go func() {
 			var err error
 			if runtimeConfig.TeamlancerMode {
-				err = server.webhttp.ListenAndServe()
+				err = server.webhttp.Serve(server.webtcpl)
 			} else {
-				err = server.webhttp.ListenAndServeTLS("", "")
+				err = server.webhttp.ServeTLS(server.webtcpl, "", "")
 			}
 			if err != http.ErrServerClosed {
 				server.Fatalf("Fatal HTTP server error: %v", err)
@@ -1595,14 +1594,14 @@ func (server *Server) Start() (err error) {
 			runtimeState.SetCheck("udp", "disabled")
 		}
 		if server.tcpl != nil && shouldListenWeb {
-			server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webwsl.Addr())
+			server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webtcpl.Addr())
 		} else if server.tcpl != nil {
 			server.Printf("Started: listening on %v", server.tcpl.Addr())
 		} else if shouldListenWeb {
-			server.Printf("Started: listening on %v", server.webwsl.Addr())
+			server.Printf("Started: listening on %v", server.webtcpl.Addr())
 		}
 	} else if shouldListenWeb {
-		server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webwsl.Addr())
+		server.Printf("Started: listening on %v and %v", server.tcpl.Addr(), server.webtcpl.Addr())
 	} else if server.tcpl != nil {
 		server.Printf("Started: listening on %v", server.tcpl.Addr())
 	}
@@ -1663,7 +1662,7 @@ func (server *Server) Start() (err error) {
 // Stop the server.
 func (server *Server) Stop() (err error) {
 	if !server.running {
-		return errors.New("server not running")
+		return nil
 	}
 	runtimeState.MarkShuttingDown()
 
@@ -1681,19 +1680,26 @@ func (server *Server) Stop() (err error) {
 	// all clients were disconnected.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(runtimeConfig.ShutdownTimeout))
 	defer cancel()
-	if server.ListenWebPort() {
+	if server.webwsl != nil {
+		err = server.webwsl.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
+	}
+
+	if server.ListenWebPort() && server.webhttp != nil {
 		err = server.webhttp.Shutdown(ctx)
 		if err == context.DeadlineExceeded {
 			server.Println("Forcibly shutdown HTTP server while stopping")
 		} else if err != nil {
 			return err
 		}
+	}
 
-		if server.webwsl != nil {
-			err = server.webwsl.Close()
-			if err != nil && !errors.Is(err, net.ErrClosed) {
-				return err
-			}
+	if server.webtcpl != nil {
+		err = server.webtcpl.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
 		}
 	}
 
@@ -1724,9 +1730,17 @@ func (server *Server) Stop() (err error) {
 	// Wait for the three network receiver
 	// goroutines end.
 	server.netwg.Wait()
+	if server.freezelog != nil {
+		err = server.freezelog.Close()
+		if err != nil {
+			return err
+		}
+		server.freezelog = nil
+	}
 
 	server.cleanPerLaunchData()
 	server.running = false
+	server.webtcpl = nil
 	server.Printf("Stopped")
 
 	return nil

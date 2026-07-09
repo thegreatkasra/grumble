@@ -15,7 +15,7 @@ var runtimeConfig RuntimeConfig
 var runtimeState = newAppRuntimeState()
 
 type appRuntimeState struct {
-	started     atomic.Int32
+	started      atomic.Int32
 	shuttingDown atomic.Int32
 
 	mu     sync.RWMutex
@@ -49,7 +49,38 @@ func (s *appRuntimeState) MarkShuttingDown() {
 }
 
 func (s *appRuntimeState) IsReady() bool {
-	return s.started.Load() == 1 && s.shuttingDown.Load() == 0
+	if s.started.Load() != 1 || s.shuttingDown.Load() != 0 {
+		return false
+	}
+	required := s.requiredChecks()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for name, expected := range required {
+		if s.checks[name] != expected {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *appRuntimeState) requiredChecks() map[string]string {
+	required := map[string]string{
+		"dataDirectory": "ok",
+		"virtualServer": "ok",
+	}
+	if runtimeConfig.TeamlancerMode {
+		required["udp"] = "disabled"
+		if runtimeConfig.EnableWeb {
+			required["webListener"] = "ok"
+		}
+		if runtimeConfig.EnableRawMumbleTCP {
+			required["rawMumbleTcpListener"] = "ok"
+		}
+		return required
+	}
+	required["webListener"] = "ok"
+	required["rawMumbleTcpListener"] = "ok"
+	return required
 }
 
 func (s *appRuntimeState) HealthHandler(w http.ResponseWriter, r *http.Request) {

@@ -116,6 +116,38 @@ func TestAcceptCloseUnblocks(t *testing.T) {
 	}
 }
 
+func TestAcceptQueueSaturationAndRecovery(t *testing.T) {
+	l := newTestListener(true)
+	srv := httptest.NewServer(l)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
+	dialer := websocket.Dialer{Subprotocols: []string{"mumble"}}
+	header := http.Header{"Origin": []string{"https://allowed.example"}}
+
+	first, _, err := dialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("first dial failed: %v", err)
+	}
+	defer first.Close()
+
+	second, _, err := dialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("second dial failed: %v", err)
+	}
+	defer second.Close()
+
+	serverConn, err := l.Accept()
+	if err != nil {
+		t.Fatalf("accept failed: %v", err)
+	}
+	defer serverConn.Close()
+
+	if _, _, err := dialer.Dial(wsURL, header); err != nil {
+		t.Fatalf("third dial after capacity freed failed: %v", err)
+	}
+}
+
 func TestBinaryFramesAccepted(t *testing.T) {
 	l := newTestListener(true)
 	srv := httptest.NewServer(l)
@@ -146,6 +178,16 @@ func TestBinaryFramesAccepted(t *testing.T) {
 	}
 	if string(buf) != string(payload) {
 		t.Fatalf("payload mismatch: got %v want %v", buf, payload)
+	}
+}
+
+func TestCloseIsSafeTwice(t *testing.T) {
+	l := newTestListener(true)
+	if err := l.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+	if err := l.Close(); err == nil {
+		t.Fatal("expected second close to report closed listener")
 	}
 }
 

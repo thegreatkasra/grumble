@@ -398,7 +398,6 @@ func (client *Client) SendUDP(buf []byte) error {
 	} else {
 		return client.sendMessage(buf)
 	}
-	panic("unreachable")
 }
 
 // Send a Message to the client.  The Message in msg to the client's

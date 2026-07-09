@@ -46,33 +46,94 @@ type Origin struct {
 	Host   string
 }
 
+type envValue struct {
+	name    string
+	value   string
+	present bool
+}
+
 func LoadRuntimeConfig() (RuntimeConfig, error) {
+	var err error
 	cfg := RuntimeConfig{
-		TeamlancerMode:          getEnvBool("TEAMLANCER_MODE", false),
-		WebBindAddress:          getEnv("WEB_BIND_ADDRESS", "0.0.0.0"),
-		WebPort:                 getEnvInt("WEB_PORT", 7880),
-		EnableWeb:               getEnvBool("ENABLE_WEB", true),
-		WebSocketPath:           getEnv("WEBSOCKET_PATH", "/connect"),
-		RawMumbleTCPBindAddress: getEnv("RAW_MUMBLE_TCP_BIND_ADDRESS", "0.0.0.0"),
-		RawMumbleTCPPort:        getEnvInt("RAW_MUMBLE_TCP_PORT", 64738),
-		EnableRawMumbleTCP:      getEnvBool("ENABLE_RAW_MUMBLE_TCP", true),
-		EnableUDP:               getEnvBool("ENABLE_UDP", false),
-		HealthPath:              getEnv("HEALTH_PATH", "/health"),
-		ReadinessPath:           getEnv("READINESS_PATH", "/ready"),
-		DataDir:                 getEnv("DATA_DIR", Args.DataDir),
-		LogLevel:                getEnv("LOG_LEVEL", "info"),
-		LogFormat:               getEnv("LOG_FORMAT", "json"),
-		AllowDevelopmentOrigins: getEnvBool("ALLOW_DEVELOPMENT_ORIGINS", false),
-		WSMaxMessageBytes:       int64(getEnvInt("WS_MAX_MESSAGE_BYTES", 1048576)),
-		WSAcceptQueueSize:       getEnvInt("WS_ACCEPT_QUEUE_SIZE", 128),
-		WSIdleTimeout:           time.Duration(getEnvInt("WS_IDLE_TIMEOUT_SECONDS", 90)) * time.Second,
-		WSWriteTimeout:          time.Duration(getEnvInt("WS_WRITE_TIMEOUT_SECONDS", 15)) * time.Second,
-		WSPingInterval:          time.Duration(getEnvInt("WS_PING_INTERVAL_SECONDS", 30)) * time.Second,
-		MaxConnections:          getEnvInt("MAX_CONNECTIONS", 1000),
-		MaxConnectionsPerIP:     getEnvInt("MAX_CONNECTIONS_PER_IP", 20),
-		ShutdownTimeout:         time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", 20)) * time.Second,
-		EnablePublicWebSocket:   getEnvBool("ENABLE_PUBLIC_WEBSOCKET", false),
-		TrustProxyHeaders:       getEnvBool("TRUST_PROXY_HEADERS", false),
+		WebSocketPath: "/connect",
+		HealthPath:    "/health",
+		ReadinessPath: "/ready",
+		LogLevel:      "info",
+		LogFormat:     "json",
+	}
+
+	if cfg.TeamlancerMode, err = getEnvBoolStrict("TEAMLANCER_MODE", false); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.WebBindAddress, err = getEnvIP("WEB_BIND_ADDRESS", "0.0.0.0"); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.WebPort, err = getEnvPositiveInt("WEB_PORT", 7880); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.EnableWeb, err = getEnvBoolStrict("ENABLE_WEB", true); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.WebSocketPath, err = getEnvPath("WEBSOCKET_PATH", cfg.WebSocketPath); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.RawMumbleTCPBindAddress, err = getEnvIP("RAW_MUMBLE_TCP_BIND_ADDRESS", "0.0.0.0"); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.RawMumbleTCPPort, err = getEnvPositiveInt("RAW_MUMBLE_TCP_PORT", 64738); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.EnableRawMumbleTCP, err = getEnvBoolStrict("ENABLE_RAW_MUMBLE_TCP", true); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.EnableUDP, err = getEnvBoolStrict("ENABLE_UDP", false); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.HealthPath, err = getEnvPath("HEALTH_PATH", cfg.HealthPath); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.ReadinessPath, err = getEnvPath("READINESS_PATH", cfg.ReadinessPath); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.DataDir, err = getEnvAbsPath("DATA_DIR", Args.DataDir); err != nil {
+		return RuntimeConfig{}, err
+	}
+	cfg.LogLevel = getEnv("LOG_LEVEL", cfg.LogLevel)
+	cfg.LogFormat = getEnv("LOG_FORMAT", cfg.LogFormat)
+	if cfg.AllowDevelopmentOrigins, err = getEnvBoolStrict("ALLOW_DEVELOPMENT_ORIGINS", false); err != nil {
+		return RuntimeConfig{}, err
+	}
+	wsMaxMessageBytes, err := getEnvPositiveInt("WS_MAX_MESSAGE_BYTES", 1048576)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	cfg.WSMaxMessageBytes = int64(wsMaxMessageBytes)
+	if cfg.WSAcceptQueueSize, err = getEnvPositiveInt("WS_ACCEPT_QUEUE_SIZE", 128); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.WSIdleTimeout, err = getEnvPositiveSeconds("WS_IDLE_TIMEOUT_SECONDS", 90); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.WSWriteTimeout, err = getEnvPositiveSeconds("WS_WRITE_TIMEOUT_SECONDS", 15); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.WSPingInterval, err = getEnvPositiveSeconds("WS_PING_INTERVAL_SECONDS", 30); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.MaxConnections, err = getEnvPositiveInt("MAX_CONNECTIONS", 1000); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.MaxConnectionsPerIP, err = getEnvPositiveInt("MAX_CONNECTIONS_PER_IP", 20); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.ShutdownTimeout, err = getEnvPositiveSeconds("SHUTDOWN_TIMEOUT_SECONDS", 20); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.EnablePublicWebSocket, err = getEnvBoolStrict("ENABLE_PUBLIC_WEBSOCKET", false); err != nil {
+		return RuntimeConfig{}, err
+	}
+	if cfg.TrustProxyHeaders, err = getEnvBoolStrict("TRUST_PROXY_HEADERS", false); err != nil {
+		return RuntimeConfig{}, err
 	}
 
 	origins, err := parseAllowedOrigins(getEnv("ALLOWED_ORIGINS", "https://teamlancer.work,https://app.teamlancer.work"), cfg.AllowDevelopmentOrigins)
@@ -163,10 +224,16 @@ func parseAllowedOrigins(raw string, allowDevelopment bool) ([]Origin, error) {
 			Scheme: strings.ToLower(u.Scheme),
 			Host:   strings.ToLower(u.Host),
 		}
+		if origin.Scheme != "http" && origin.Scheme != "https" {
+			return nil, fmt.Errorf("invalid origin %q: scheme must be http or https", part)
+		}
 		if isDevelopmentOrigin(origin) && !allowDevelopment {
 			return nil, fmt.Errorf("development origin %q requires ALLOW_DEVELOPMENT_ORIGINS=true", part)
 		}
 		origins = append(origins, origin)
+	}
+	if len(origins) == 0 {
+		return nil, errors.New("ALLOWED_ORIGINS must contain at least one origin")
 	}
 	return origins, nil
 }
@@ -215,26 +282,82 @@ func getEnv(key, fallback string) string {
 	return val
 }
 
-func getEnvBool(key string, fallback bool) bool {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return fallback
+func lookupEnv(key string) envValue {
+	raw, present := os.LookupEnv(key)
+	return envValue{
+		name:    key,
+		value:   strings.TrimSpace(raw),
+		present: present,
 	}
-	parsed, err := strconv.ParseBool(raw)
-	if err != nil {
-		return fallback
-	}
-	return parsed
 }
 
-func getEnvInt(key string, fallback int) int {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return fallback
+func getEnvBoolStrict(key string, fallback bool) (bool, error) {
+	env := lookupEnv(key)
+	if !env.present || env.value == "" {
+		return fallback, nil
 	}
-	parsed, err := strconv.Atoi(raw)
+	parsed, err := strconv.ParseBool(env.value)
 	if err != nil {
-		return fallback
+		return false, fmt.Errorf("%s must be a boolean", key)
 	}
-	return parsed
+	return parsed, nil
+}
+
+func getEnvPositiveInt(key string, fallback int) (int, error) {
+	env := lookupEnv(key)
+	if !env.present || env.value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(env.value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", key)
+	}
+	return parsed, nil
+}
+
+func getEnvPositiveSeconds(key string, fallbackSeconds int) (time.Duration, error) {
+	seconds, err := getEnvPositiveInt(key, fallbackSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func getEnvPath(key, fallback string) (string, error) {
+	env := lookupEnv(key)
+	if !env.present || env.value == "" {
+		return fallback, nil
+	}
+	if !strings.HasPrefix(env.value, "/") {
+		return "", fmt.Errorf("%s must start with /", key)
+	}
+	if strings.ContainsAny(env.value, "?#") {
+		return "", fmt.Errorf("%s must not contain query or fragment characters", key)
+	}
+	return env.value, nil
+}
+
+func getEnvAbsPath(key, fallback string) (string, error) {
+	env := lookupEnv(key)
+	if !env.present || env.value == "" {
+		return fallback, nil
+	}
+	if !filepath.IsAbs(env.value) {
+		return "", fmt.Errorf("%s must be an absolute path", key)
+	}
+	return env.value, nil
+}
+
+func getEnvIP(key, fallback string) (string, error) {
+	env := lookupEnv(key)
+	if !env.present || env.value == "" {
+		return fallback, nil
+	}
+	if net.ParseIP(env.value) == nil {
+		return "", fmt.Errorf("%s must be a valid IP address", key)
+	}
+	return env.value, nil
 }
