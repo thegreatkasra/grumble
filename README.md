@@ -49,7 +49,7 @@ Production example:
 
 ```env
 TEAMLANCER_MODE=true
-TEAMLANCER_AUTH_MODE=legacy
+TEAMLANCER_AUTH_MODE=internal
 WEB_BIND_ADDRESS=0.0.0.0
 WEB_PORT=7880
 ENABLE_WEB=true
@@ -64,7 +64,10 @@ DATA_DIR=/data
 LOG_LEVEL=info
 LOG_FORMAT=json
 ALLOWED_ORIGINS=https://teamlancer.work,https://app.teamlancer.work
-ENABLE_PUBLIC_WEBSOCKET=false
+ENABLE_PUBLIC_WEBSOCKET=true
+TEAMLANCER_JWT_SECRET=replace-me
+TEAMLANCER_JWT_ISSUER=teamlancer
+TEAMLANCER_JWT_AUDIENCE=grumble-voice
 ```
 
 Development origin example:
@@ -90,7 +93,7 @@ docker run \
   -p 7880:7880 \
   -p 64738:64738 \
   -e TEAMLANCER_MODE=true \
-  -e TEAMLANCER_AUTH_MODE=legacy \
+  -e TEAMLANCER_AUTH_MODE=internal \
   -e WEB_BIND_ADDRESS=0.0.0.0 \
   -e WEB_PORT=7880 \
   -e ENABLE_WEB=true \
@@ -105,7 +108,10 @@ docker run \
   -e LOG_LEVEL=info \
   -e LOG_FORMAT=json \
   -e ALLOWED_ORIGINS=https://teamlancer.work,https://app.teamlancer.work \
-  -e ENABLE_PUBLIC_WEBSOCKET=false \
+  -e ENABLE_PUBLIC_WEBSOCKET=true \
+  -e TEAMLANCER_JWT_SECRET=replace-me \
+  -e TEAMLANCER_JWT_ISSUER=teamlancer \
+  -e TEAMLANCER_JWT_AUDIENCE=grumble-voice \
   teamlancer-voice-engine
 ```
 
@@ -129,13 +135,43 @@ Notes:
 
 - External infrastructure port mappings must not be hard-coded.
 - Browser audio remains on Mumble `UDPTunnel` over the stream path.
-- Public WebSocket remains disabled by default until Stage 2 authentication exists.
+- Teamlancer mode now requires `TEAMLANCER_AUTH_MODE=internal`; startup fails otherwise.
 - UDP remains intentionally disabled in Teamlancer mode.
 - Horizontal scaling is not supported in this stage.
 
+## Production Enablement
+
+Required environment:
+
+```env
+TEAMLANCER_MODE=true
+TEAMLANCER_AUTH_MODE=internal
+ENABLE_PUBLIC_WEBSOCKET=true
+```
+
+Production behavior:
+
+- Browser WebSocket sessions reject missing origin, invalid origin, missing JWT, invalid JWT, expired JWT, and denied room joins.
+- Browser WebSocket sessions keep origin validation, connection limits, frame size limits, and ping/pong heartbeat enabled.
+- Structured browser session logs emit `voice_ws_connected` with `user_id`, `board_id`, and `room_id`.
+- Structured browser session rejects emit `voice_ws_rejected` with `reason` and `board_id` when available.
+- Structured room lifecycle logs emit `voice_room_created`, `voice_room_joined`, `voice_room_left`, `voice_room_empty`, and `voice_room_destroyed`.
+- `/ready` includes `voiceEngine`, `websocket`, and `auth` status fields in addition to the detailed check map.
+
+Deployment checklist:
+
+- Set `TEAMLANCER_MODE=true`
+- Set `TEAMLANCER_AUTH_MODE=internal`
+- Set `ENABLE_PUBLIC_WEBSOCKET=true`
+- Set `TEAMLANCER_JWT_SECRET`, `TEAMLANCER_JWT_ISSUER`, and `TEAMLANCER_JWT_AUDIENCE`
+- Ensure `ALLOWED_ORIGINS` includes every production browser origin
+- Keep `ENABLE_UDP=false`
+- Verify `/ready` returns `voiceEngine=ok`, `websocket=ok`, and `auth=ok`
+- Verify browser clients use the backend-issued short-lived voice JWT, not the primary application JWT
+
 ## Teamlancer Voice Authentication
 
-When `TEAMLANCER_MODE=true` and `TEAMLANCER_AUTH_MODE=internal`, Grumble validates a short-lived Teamlancer voice token instead of using legacy Grumble username/password or certificate authentication. Legacy authentication remains unchanged when `TEAMLANCER_AUTH_MODE=legacy`.
+When `TEAMLANCER_MODE=true`, Grumble requires `TEAMLANCER_AUTH_MODE=internal` and validates a short-lived Teamlancer voice token instead of using legacy Grumble username/password or certificate authentication.
 
 Authentication flow:
 
@@ -161,7 +197,7 @@ The browser does not send the primary Teamlancer application JWT directly to Gru
 - `exp` expiration
 - `iss` issuer against `TEAMLANCER_JWT_ISSUER`
 - `aud` audience against `TEAMLANCER_JWT_AUDIENCE`
-- required claims: `sub`, `name`, `exp`
+- required claims: `sub`, `name`, `team_id`, `board_id`, `permissions`, `exp`
 
 Optional claims are mapped into `pkg/teamlancer/auth.UserIdentity`:
 
@@ -195,8 +231,34 @@ TEAMLANCER_JWT_AUDIENCE=grumble-voice
 Failure handling:
 
 - authentication failures emit `voice_auth_failed`
+- browser session rejections emit `voice_ws_rejected`
 - clients receive a generic authentication rejection
 - JWT contents and secrets are never written to structured logs
+
+### Backend Session Contract
+
+The Teamlancer backend session endpoint is expected to mint the browser voice session returned from:
+
+`POST /workspace/boards/:boardId/voice/session`
+
+Expected response body:
+
+```json
+{
+  "url": "wss://live.teamlancer.work/connect",
+  "token": "short-lived-voice-jwt",
+  "roomId": "team-7:board-3",
+  "expiresAt": "2026-07-10T12:00:00Z"
+}
+```
+
+Compatibility requirements with this engine:
+
+- `url` must target the Grumble WebSocket endpoint at `/connect`
+- `token` must be the short-lived Teamlancer voice JWT consumed by Grumble
+- `roomId` must match the Grumble board channel mapping derived from `team_id` and `board_id`
+- `expiresAt` must match the JWT `exp` lifetime envelope
+- JWT claims consumed by Grumble are `sub`, `name`, `team_id`, `board_id`, `permissions`, and `exp`
 
 ## Teamlancer Voice Permissions
 

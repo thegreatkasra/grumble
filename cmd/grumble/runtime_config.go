@@ -158,6 +158,9 @@ func (cfg RuntimeConfig) Validate() error {
 	default:
 		return fmt.Errorf("TEAMLANCER_AUTH_MODE must be one of %q or %q", tlauth.ModeInternal, tlauth.ModeLegacy)
 	}
+	if cfg.TeamlancerMode && cfg.EffectiveTeamlancerAuthMode() != tlauth.ModeInternal {
+		return fmt.Errorf("TEAMLANCER_MODE=true requires TEAMLANCER_AUTH_MODE=%q", tlauth.ModeInternal)
+	}
 	if err := validateTCPPort(cfg.WebPort, "WEB_PORT"); err != nil {
 		return err
 	}

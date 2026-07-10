@@ -10,7 +10,7 @@ import (
 func TestRuntimeConfigValidDefaults(t *testing.T) {
 	cfg := RuntimeConfig{
 		TeamlancerMode:          true,
-		TeamlancerAuthMode:      "legacy",
+		TeamlancerAuthMode:      "internal",
 		WebBindAddress:          "0.0.0.0",
 		WebPort:                 7880,
 		EnableWeb:               true,
@@ -157,6 +157,15 @@ func TestRuntimeConfigRejectsUDPInTeamlancerMode(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigRejectsLegacyAuthInTeamlancerMode(t *testing.T) {
+	cfg := validRuntimeConfigForTests()
+	cfg.TeamlancerMode = true
+	cfg.TeamlancerAuthMode = "legacy"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected legacy auth in Teamlancer mode to fail")
+	}
+}
+
 func TestLoadRuntimeConfigRejectsMalformedValues(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -211,9 +220,21 @@ func TestLoadRuntimeConfigUsesDefaultsWhenEnvAbsent(t *testing.T) {
 	}
 }
 
+func TestLoadRuntimeConfigRejectsLegacyAuthWhenTeamlancerModeEnabled(t *testing.T) {
+	setValidRuntimeEnv(t)
+	t.Setenv("TEAMLANCER_AUTH_MODE", "legacy")
+	_, err := LoadRuntimeConfig()
+	if err == nil {
+		t.Fatal("expected teamlancer legacy auth to fail")
+	}
+	if !strings.Contains(err.Error(), "TEAMLANCER_MODE=true requires TEAMLANCER_AUTH_MODE") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func validRuntimeConfigForTests() RuntimeConfig {
 	return RuntimeConfig{
-		TeamlancerAuthMode:      "legacy",
+		TeamlancerAuthMode:      "internal",
 		WebBindAddress:          "0.0.0.0",
 		WebPort:                 7880,
 		WebSocketPath:           "/connect",
@@ -240,7 +261,7 @@ func setValidRuntimeEnv(t *testing.T) {
 	Args.DataDir = filepath.Clean(defaultDataDir())
 	t.Setenv("TEAMLANCER_MODE", "true")
 	t.Setenv("WEB_BIND_ADDRESS", "0.0.0.0")
-	t.Setenv("TEAMLANCER_AUTH_MODE", "legacy")
+	t.Setenv("TEAMLANCER_AUTH_MODE", "internal")
 	t.Setenv("WEB_PORT", "7880")
 	t.Setenv("ENABLE_WEB", "true")
 	t.Setenv("WEBSOCKET_PATH", "/connect")

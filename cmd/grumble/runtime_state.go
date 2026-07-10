@@ -26,6 +26,9 @@ func newAppRuntimeState() *appRuntimeState {
 	s := &appRuntimeState{}
 	s.checks = map[string]string{
 		"dataDirectory":        "starting",
+		"voiceEngine":          "starting",
+		"websocket":            "starting",
+		"auth":                 "starting",
 		"webListener":          "starting",
 		"rawMumbleTcpListener": "starting",
 		"udp":                  "disabled",
@@ -80,8 +83,11 @@ func (s *appRuntimeState) requiredChecks() map[string]string {
 		"virtualServer": "ok",
 	}
 	if runtimeConfig.TeamlancerMode {
+		required["voiceEngine"] = "ok"
+		required["auth"] = "ok"
 		required["udp"] = "disabled"
 		if runtimeConfig.EnableWeb {
+			required["websocket"] = "ok"
 			required["webListener"] = "ok"
 		}
 		if runtimeConfig.EnableRawMumbleTCP {
@@ -110,15 +116,21 @@ func (s *appRuntimeState) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	checks := s.ChecksSnapshot()
 	if !s.IsReady() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
-			"status": "not_ready",
-			"checks": checks,
+			"status":      "not_ready",
+			"voiceEngine": checks["voiceEngine"],
+			"websocket":   checks["websocket"],
+			"auth":        checks["auth"],
+			"checks":      checks,
 		})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status": "ready",
-		"checks": checks,
+		"status":      "ready",
+		"voiceEngine": checks["voiceEngine"],
+		"websocket":   checks["websocket"],
+		"auth":        checks["auth"],
+		"checks":      checks,
 	})
 }
 

@@ -265,7 +265,7 @@ func newTeamlancerTestServer(t *testing.T, enableRawTCP bool) (*Server, func()) 
 	rawPort := reserveTCPPort(t)
 	runtimeConfig = RuntimeConfig{
 		TeamlancerMode:          true,
-		TeamlancerAuthMode:      "legacy",
+		TeamlancerAuthMode:      "internal",
 		WebBindAddress:          "127.0.0.1",
 		WebPort:                 webPort,
 		EnableWeb:               true,
@@ -288,6 +288,9 @@ func newTeamlancerTestServer(t *testing.T, enableRawTCP bool) (*Server, func()) 
 		MaxConnectionsPerIP:     4,
 		ShutdownTimeout:         2 * time.Second,
 	}
+	t.Setenv("TEAMLANCER_JWT_SECRET", "test-secret")
+	t.Setenv("TEAMLANCER_JWT_ISSUER", "teamlancer")
+	t.Setenv("TEAMLANCER_JWT_AUDIENCE", "grumble-voice")
 
 	server, err := NewServer(1)
 	if err != nil {

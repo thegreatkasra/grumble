@@ -93,11 +93,14 @@ func TestValidatorRejectsInvalidIssuer(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	validator := newTestValidator(t, now)
 	token := signToken(t, "secret-123", map[string]any{
-		"sub":  "user-1",
-		"name": "Alice",
-		"exp":  now.Add(time.Minute).Unix(),
-		"iss":  "other",
-		"aud":  "grumble-voice",
+		"sub":         "user-1",
+		"name":        "Alice",
+		"exp":         now.Add(time.Minute).Unix(),
+		"iss":         "other",
+		"aud":         "grumble-voice",
+		"team_id":     "team-1",
+		"board_id":    "board-1",
+		"permissions": []string{"join_voice", "publish_audio", "receive_audio"},
 	})
 
 	_, err := validator.Validate(token)
@@ -110,16 +113,57 @@ func TestValidatorRejectsInvalidAudience(t *testing.T) {
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	validator := newTestValidator(t, now)
 	token := signToken(t, "secret-123", map[string]any{
-		"sub":  "user-1",
-		"name": "Alice",
-		"exp":  now.Add(time.Minute).Unix(),
-		"iss":  "teamlancer",
-		"aud":  "other-audience",
+		"sub":         "user-1",
+		"name":        "Alice",
+		"exp":         now.Add(time.Minute).Unix(),
+		"iss":         "teamlancer",
+		"aud":         "other-audience",
+		"team_id":     "team-1",
+		"board_id":    "board-1",
+		"permissions": []string{"join_voice", "publish_audio", "receive_audio"},
 	})
 
 	_, err := validator.Validate(token)
 	if err == nil || !strings.Contains(err.Error(), ErrInvalidAudience.Error()) {
 		t.Fatalf("expected invalid audience error, got %v", err)
+	}
+}
+
+func TestValidatorRejectsMissingBoardID(t *testing.T) {
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	validator := newTestValidator(t, now)
+	token := signToken(t, "secret-123", map[string]any{
+		"sub":         "user-1",
+		"name":        "Alice",
+		"exp":         now.Add(time.Minute).Unix(),
+		"iss":         "teamlancer",
+		"aud":         "grumble-voice",
+		"team_id":     "team-1",
+		"permissions": []string{"join_voice", "publish_audio", "receive_audio"},
+	})
+
+	_, err := validator.Validate(token)
+	if err == nil || !strings.Contains(err.Error(), ErrMissingClaim.Error()) {
+		t.Fatalf("expected missing claim error, got %v", err)
+	}
+}
+
+func TestValidatorRejectsMissingPermissions(t *testing.T) {
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	validator := newTestValidator(t, now)
+	token := signToken(t, "secret-123", map[string]any{
+		"sub":      "user-1",
+		"name":     "Alice",
+		"exp":      now.Add(time.Minute).Unix(),
+		"iss":      "teamlancer",
+		"aud":      "grumble-voice",
+		"team_id":  "team-1",
+		"board_id": "board-1",
+	})
+
+	_, err := validator.Validate(token)
+	if err == nil || !strings.Contains(err.Error(), ErrMissingClaim.Error()) {
+		t.Fatalf("expected missing claim error, got %v", err)
 	}
 }
 

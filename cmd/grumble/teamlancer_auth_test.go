@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -74,11 +78,12 @@ func TestTeamlancerModeSelectsInternalAuthenticator(t *testing.T) {
 	}
 }
 
-func TestLegacyAuthModeKeepsLegacyAuthentication(t *testing.T) {
+func TestBrowserWebSocketRejectedWithoutJWT(t *testing.T) {
 	server, cleanup := newTeamlancerTestServer(t, true)
 	defer cleanup()
 
-	runtimeConfig.TeamlancerAuthMode = tlauth.ModeLegacy
+	var logs bytes.Buffer
+	server.Logger = log.New(&logs, "", 0)
 	runtimeConfig.EnablePublicWebSocket = true
 	if err := server.Start(); err != nil {
 		t.Fatalf("start failed: %v", err)
@@ -89,21 +94,34 @@ func TestLegacyAuthModeKeepsLegacyAuthentication(t *testing.T) {
 		}
 	}()
 
-	conn, _ := connectMumbleWebSocketClient(t, "legacy-user")
+	conn := openMumbleWebSocketClient(t)
+	defer conn.Close()
+	performMumbleVersionHandshake(t, conn)
+	writeAuthenticateMessage(t, conn, "no-token-user", "")
 
+	kind, payload, err := readUntilMessage(conn, 3*time.Second, mumbleproto.MessageReject)
+	if err != nil {
+		t.Fatalf("read reject: %v", err)
+	}
+	if kind != mumbleproto.MessageReject {
+		t.Fatalf("expected Reject message, got %d", kind)
+	}
+	var reject mumbleproto.Reject
+	if err := proto.Unmarshal(payload, &reject); err != nil {
+		t.Fatalf("decode reject: %v", err)
+	}
+	if reject.GetType() != mumbleproto.Reject_WrongUserPW {
+		t.Fatalf("expected wrong user password reject, got %v", reject.GetType())
+	}
 	waitForCondition(t, 3*time.Second, func() bool {
-		return server.clientCount() == 1
-	}, "legacy authenticated client")
+		return server.clientCount() == 0
+	}, "missing jwt cleanup")
 
-	client := server.clientsSnapshot()[0]
-	if client.teamlancerIdentity != nil {
-		t.Fatal("expected legacy authentication to leave teamlancer identity unset")
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	assertEventPresent(t, events, "voice_ws_rejected")
+	if got := eventField(t, events, "voice_ws_rejected", "reason"); got != "invalid_token" {
+		t.Fatalf("expected invalid_token reason, got %q", got)
 	}
-	if client.Username != "legacy-user" {
-		t.Fatalf("expected legacy username to be preserved, got %q", client.Username)
-	}
-
-	closeMumbleClient(t, conn, server, 0)
 }
 
 func TestFailedTeamlancerAuthenticationDoesNotCreateSession(t *testing.T) {
@@ -202,6 +220,71 @@ func TestSuccessfulTeamlancerAuthenticationReturnsIdentity(t *testing.T) {
 	}
 
 	closeMumbleClient(t, conn, server, 0)
+}
+
+func TestBrowserWebSocketAcceptedWithValidJWT(t *testing.T) {
+	server, cleanup := newTeamlancerTestServer(t, true)
+	defer cleanup()
+
+	var logs bytes.Buffer
+	server.Logger = log.New(&logs, "", 0)
+	runtimeConfig.EnablePublicWebSocket = true
+	if err := server.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer func() {
+		if err := server.Stop(); err != nil {
+			t.Fatalf("stop failed: %v", err)
+		}
+	}()
+
+	conn := openMumbleWebSocketClient(t)
+	performMumbleVersionHandshake(t, conn)
+	writeAuthenticateMessage(t, conn, "ignored", testVoiceJWT(t, time.Now().Add(time.Minute), "board-auth"))
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		return server.clientCount() == 1
+	}, "valid jwt auth")
+
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	assertEventPresent(t, events, "voice_ws_connected")
+	if got := eventField(t, events, "voice_ws_connected", "board_id"); got != "board-auth" {
+		t.Fatalf("expected board-auth board_id, got %q", got)
+	}
+
+	closeMumbleClient(t, conn, server, 0)
+}
+
+func TestBrowserWebSocketRejectedWithExpiredJWT(t *testing.T) {
+	server, cleanup := newTeamlancerTestServer(t, true)
+	defer cleanup()
+
+	var logs bytes.Buffer
+	server.Logger = log.New(&logs, "", 0)
+	runtimeConfig.EnablePublicWebSocket = true
+	if err := server.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer func() {
+		if err := server.Stop(); err != nil {
+			t.Fatalf("stop failed: %v", err)
+		}
+	}()
+
+	conn := openMumbleWebSocketClient(t)
+	defer conn.Close()
+	performMumbleVersionHandshake(t, conn)
+	writeAuthenticateMessage(t, conn, "ignored", testVoiceJWT(t, time.Now().Add(-time.Minute), "board-expired"))
+
+	if _, _, err := readUntilMessage(conn, 3*time.Second, mumbleproto.MessageReject); err != nil {
+		t.Fatalf("read reject: %v", err)
+	}
+
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	assertEventPresent(t, events, "voice_ws_rejected")
+	if got := eventField(t, events, "voice_ws_rejected", "reason"); got != "expired_token" {
+		t.Fatalf("expected expired_token reason, got %q", got)
+	}
 }
 
 func TestTeamlancerJoinVoiceDeniedRejectsAuthentication(t *testing.T) {
@@ -358,4 +441,36 @@ func closeMumbleClient(t *testing.T, conn *websocket.Conn, server *Server, wantC
 	waitForCondition(t, 3*time.Second, func() bool {
 		return server.clientCount() == wantCount
 	}, "client disconnect cleanup")
+}
+
+func testVoiceJWT(t *testing.T, exp time.Time, boardID string) string {
+	t.Helper()
+	headerBytes, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	claimsBytes, err := json.Marshal(map[string]any{
+		"sub":      "user-42",
+		"name":     "Alice TL",
+		"exp":      exp.Unix(),
+		"iss":      "teamlancer",
+		"aud":      "grumble-voice",
+		"team_id":  "team-7",
+		"board_id": boardID,
+		"permissions": []string{
+			"join_voice",
+			"publish_audio",
+			"receive_audio",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	encodedHeader := base64.RawURLEncoding.EncodeToString(headerBytes)
+	encodedClaims := base64.RawURLEncoding.EncodeToString(claimsBytes)
+	signingInput := encodedHeader + "." + encodedClaims
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	_, _ = mac.Write([]byte(signingInput))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return signingInput + "." + signature
 }

@@ -68,7 +68,10 @@ func TestReadyEndpointBeforeAndAfterInitialization(t *testing.T) {
 	}
 
 	state.SetCheck("dataDirectory", "ok")
+	state.SetCheck("voiceEngine", "ok")
+	state.SetCheck("auth", "ok")
 	state.SetCheck("webListener", "ok")
+	state.SetCheck("websocket", "ok")
 	state.SetCheck("rawMumbleTcpListener", "ok")
 	state.SetCheck("udp", "disabled")
 	state.SetCheck("virtualServer", "ok")
@@ -113,7 +116,10 @@ func TestReadyEndpointRequiresAllEnabledChecks(t *testing.T) {
 	state := newAppRuntimeState()
 	state.MarkReady()
 	state.SetCheck("dataDirectory", "ok")
+	state.SetCheck("voiceEngine", "ok")
+	state.SetCheck("auth", "ok")
 	state.SetCheck("webListener", "ok")
+	state.SetCheck("websocket", "ok")
 	state.SetCheck("udp", "disabled")
 	state.SetCheck("virtualServer", "ok")
 
@@ -134,7 +140,10 @@ func TestReadyEndpointSkipsDisabledRawListenerRequirement(t *testing.T) {
 	state := newAppRuntimeState()
 	state.MarkReady()
 	state.SetCheck("dataDirectory", "ok")
+	state.SetCheck("voiceEngine", "ok")
+	state.SetCheck("auth", "ok")
 	state.SetCheck("webListener", "ok")
+	state.SetCheck("websocket", "ok")
 	state.SetCheck("udp", "disabled")
 	state.SetCheck("virtualServer", "ok")
 
@@ -155,7 +164,10 @@ func TestReadyEndpointBodyIncludesChecks(t *testing.T) {
 	state := newAppRuntimeState()
 	state.MarkReady()
 	state.SetCheck("dataDirectory", "ok")
+	state.SetCheck("voiceEngine", "ok")
+	state.SetCheck("auth", "ok")
 	state.SetCheck("webListener", "ok")
+	state.SetCheck("websocket", "ok")
 	state.SetCheck("udp", "disabled")
 	state.SetCheck("virtualServer", "ok")
 
@@ -164,14 +176,20 @@ func TestReadyEndpointBodyIncludesChecks(t *testing.T) {
 	state.ReadyHandler(rec, req)
 
 	var payload struct {
-		Status string            `json:"status"`
-		Checks map[string]string `json:"checks"`
+		Status      string            `json:"status"`
+		VoiceEngine string            `json:"voiceEngine"`
+		WebSocket   string            `json:"websocket"`
+		Auth        string            `json:"auth"`
+		Checks      map[string]string `json:"checks"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unable to decode body: %v", err)
 	}
 	if payload.Status != "ready" {
 		t.Fatalf("expected ready status, got %q", payload.Status)
+	}
+	if payload.VoiceEngine != "ok" || payload.WebSocket != "ok" || payload.Auth != "ok" {
+		t.Fatalf("expected ready voice checks to be ok, got %+v", payload)
 	}
 	if payload.Checks["udp"] != "disabled" {
 		t.Fatalf("expected udp=disabled, got %q", payload.Checks["udp"])

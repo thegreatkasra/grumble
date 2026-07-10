@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"mumble.info/grumble/pkg/mumbleproto"
@@ -47,6 +48,27 @@ func (server *Server) logAuthEvent(level, event string, client *Client, userID s
 	emitStructuredEvent(server.Logger, level, event, fields)
 }
 
+func (server *Server) logVoiceWebSocketRejected(client *Client, reason, boardID string) {
+	if client == nil || client.listenerType != "websocket" {
+		return
+	}
+	emitStructuredEvent(server.Logger, "warn", "voice_ws_rejected", map[string]string{
+		"reason":   reason,
+		"board_id": strings.TrimSpace(boardID),
+	})
+}
+
+func (server *Server) logVoiceWebSocketConnected(client *Client, identity *tlauth.UserIdentity, roomID string) {
+	if client == nil || client.listenerType != "websocket" || identity == nil {
+		return
+	}
+	emitStructuredEvent(server.Logger, "info", "voice_ws_connected", map[string]string{
+		"user_id":  strings.TrimSpace(identity.UserID),
+		"board_id": strings.TrimSpace(identity.BoardID),
+		"room_id":  strings.TrimSpace(roomID),
+	})
+}
+
 func (server *Server) handleTeamlancerAuthenticate(client *Client, auth *mumbleproto.Authenticate) bool {
 	req := tlauth.Request{
 		ConnectionID:      client.connectionID,
@@ -64,6 +86,7 @@ func (server *Server) handleTeamlancerAuthenticate(client *Client, auth *mumblep
 	result, err := server.teamlancerAuthenticator.Authenticate(context.Background(), req)
 	if err != nil {
 		reason := classifyAuthFailure(err)
+		server.logVoiceWebSocketRejected(client, reason, "")
 		server.logAuthEvent("warn", "voice_auth_failed", client, "", map[string]string{
 			"reason": reason,
 		})
@@ -71,6 +94,7 @@ func (server *Server) handleTeamlancerAuthenticate(client *Client, auth *mumblep
 		return false
 	}
 	if result == nil || result.Identity == nil {
+		server.logVoiceWebSocketRejected(client, "missing_identity", "")
 		server.logAuthEvent("warn", "voice_auth_failed", client, "", map[string]string{
 			"reason": "missing_identity",
 		})
@@ -78,6 +102,7 @@ func (server *Server) handleTeamlancerAuthenticate(client *Client, auth *mumblep
 		return false
 	}
 	if !tlguard.CanJoinVoice(result.Identity) {
+		server.logVoiceWebSocketRejected(client, "permission_denied", result.Identity.BoardID)
 		server.logAuthEvent("warn", "voice_auth_failed", client, result.Identity.UserID, map[string]string{
 			"reason": "permission_denied",
 		})

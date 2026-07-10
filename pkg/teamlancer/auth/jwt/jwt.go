@@ -126,6 +126,9 @@ func (v *Validator) Validate(token string) (*Claims, error) {
 	if strings.TrimSpace(raw.Subject) == "" || strings.TrimSpace(raw.Name) == "" {
 		return nil, ErrMissingClaim
 	}
+	if strings.TrimSpace(raw.TeamID) == "" || strings.TrimSpace(raw.BoardID) == "" || len(raw.Permissions) == 0 || string(raw.Permissions) == "null" {
+		return nil, ErrMissingClaim
+	}
 	if raw.Issuer != v.issuer {
 		return nil, ErrInvalidIssuer
 	}

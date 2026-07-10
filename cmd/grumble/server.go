@@ -383,7 +383,7 @@ func (server *Server) RemoveClient(client *Client, kicked bool) {
 		}
 		if destroyed {
 			server.logVoiceRoomEvent("voice_room_destroyed", room, client.teamlancerIdentity.UserID)
-			if channel != nil && channel.IsTemporary() && channel.IsEmpty() {
+			if channel != nil && channel.IsTemporary() && channel.IsEmpty() && runtimeState.shuttingDown.Load() == 0 {
 				select {
 				case server.tempRemove <- channel:
 				default:
@@ -400,7 +400,7 @@ func (server *Server) RemoveClient(client *Client, kicked bool) {
 			Session: proto.Uint32(client.Session()),
 		})
 		if err != nil {
-			server.Panic("Unable to broadcast UserRemove message for disconnected client.")
+			server.Printf("Unable to broadcast UserRemove message for disconnected client: %v", err)
 		}
 	}
 }
@@ -550,6 +550,7 @@ func (server *Server) handleAuthenticate(client *Client, msg *Message) {
 
 	// Did we get a username?
 	if auth.Username == nil || len(*auth.Username) == 0 {
+		server.logVoiceWebSocketRejected(client, "missing_username", "")
 		server.logAuthEvent("warn", "voice_auth_failed", client, "", map[string]string{
 			"reason": "missing_username",
 		})
@@ -601,6 +602,11 @@ func (server *Server) finishAuthenticate(client *Client) {
 		// The user is already present on the server.
 		if found {
 			// todo(mkrautz): Do the address checking.
+			boardID := ""
+			if client.teamlancerIdentity != nil {
+				boardID = client.teamlancerIdentity.BoardID
+			}
+			server.logVoiceWebSocketRejected(client, "username_in_use", boardID)
 			server.logAuthEvent("warn", "voice_auth_failed", client, server.authenticationUsername(client), map[string]string{
 				"reason": "username_in_use",
 			})
@@ -613,6 +619,11 @@ func (server *Server) finishAuthenticate(client *Client) {
 
 	channel, err := server.resolveAuthenticatedChannel(client)
 	if err != nil {
+		boardID := ""
+		if client.teamlancerIdentity != nil {
+			boardID = client.teamlancerIdentity.BoardID
+		}
+		server.logVoiceWebSocketRejected(client, "voice_room_join_denied", boardID)
 		server.logAuthEvent("warn", "voice_auth_failed", client, server.authenticationUsername(client), map[string]string{
 			"reason": "voice_room_join_denied",
 		})
@@ -621,6 +632,11 @@ func (server *Server) finishAuthenticate(client *Client) {
 	}
 	room, created, err := server.joinBoardVoiceRoom(client.teamlancerIdentity, channel)
 	if err != nil {
+		boardID := ""
+		if client.teamlancerIdentity != nil {
+			boardID = client.teamlancerIdentity.BoardID
+		}
+		server.logVoiceWebSocketRejected(client, "voice_room_join_denied", boardID)
 		server.logAuthEvent("warn", "voice_auth_failed", client, server.authenticationUsername(client), map[string]string{
 			"reason": "voice_room_join_denied",
 		})
@@ -636,6 +652,11 @@ func (server *Server) finishAuthenticate(client *Client) {
 
 	// Add the client to the connected list
 	server.setClient(client)
+	roomID := ""
+	if room != nil {
+		roomID = room.RoomID
+	}
+	server.logVoiceWebSocketConnected(client, client.teamlancerIdentity, roomID)
 	server.logAuthEvent("info", "voice_auth_success", client, server.authenticationUsername(client), nil)
 
 	// Warn clients without CELT support that they might not be able to talk to everyone else.
@@ -1257,7 +1278,7 @@ func (server *Server) RemoveChannel(channel *Channel) {
 		userstate.ChannelId = proto.Uint32(uint32(target.Id))
 		server.userEnterChannel(client, target, userstate)
 		if err := server.broadcastProtoMessage(userstate); err != nil {
-			server.Panicf("%v", err)
+			server.Printf("Unable to broadcast temporary channel move during cleanup: %v", err)
 		}
 	}
 
@@ -1269,7 +1290,7 @@ func (server *Server) RemoveChannel(channel *Channel) {
 		ChannelId: proto.Uint32(uint32(channel.Id)),
 	}
 	if err := server.broadcastProtoMessage(chanremove); err != nil {
-		server.Panicf("%v", err)
+		server.Printf("Unable to broadcast channel removal during cleanup: %v", err)
 	}
 }
 
@@ -1471,7 +1492,16 @@ func (server *Server) initPerLaunchData() error {
 	server.tempRemove = make(chan *Channel, 1)
 	server.clientAuthenticated = make(chan *Client)
 	server.teamlancerVoiceRooms = tlvoice.NewVoiceRoomManager()
-	return server.configureAuthenticator()
+	if err := server.configureAuthenticator(); err != nil {
+		return err
+	}
+	if runtimeConfig.TeamlancerMode {
+		runtimeState.SetCheck("auth", "ok")
+		if runtimeConfig.EnableWeb && runtimeConfig.EnablePublicWebSocket {
+			runtimeState.SetCheck("websocket", "ok")
+		}
+	}
+	return nil
 }
 
 // Clean per-launch data
@@ -1649,6 +1679,11 @@ func (server *Server) Start() (err error) {
 			}
 		}()
 		runtimeState.SetCheck("webListener", "ok")
+		if runtimeConfig.EnablePublicWebSocket {
+			runtimeState.SetCheck("websocket", "ok")
+		} else {
+			runtimeState.SetCheck("websocket", "disabled")
+		}
 		emitStructuredEvent(server.Logger, "info", "web_listener_started", map[string]string{
 			"listener_type": "web",
 		})
@@ -1660,6 +1695,7 @@ func (server *Server) Start() (err error) {
 		})
 	}
 	if runtimeConfig.TeamlancerMode {
+		runtimeState.SetCheck("voiceEngine", "ok")
 		if !enableUDP {
 			runtimeState.SetCheck("udp", "disabled")
 			emitStructuredEvent(server.Logger, "info", "udp_disabled", map[string]string{

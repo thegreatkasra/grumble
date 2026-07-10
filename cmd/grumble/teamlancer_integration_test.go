@@ -520,11 +520,16 @@ func TestTeamlancerBoardRoomCleanupWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestLegacyModeBoardIsolationUnchanged(t *testing.T) {
+func TestInternalModeUserWithoutBoardScopeCanMoveChannels(t *testing.T) {
 	server, cleanup := newTeamlancerTestServer(t, true)
 	defer cleanup()
 	runtimeConfig.EnablePublicWebSocket = true
-	runtimeConfig.TeamlancerAuthMode = tlauth.ModeLegacy
+	runtimeConfig.TeamlancerAuthMode = tlauth.ModeInternal
+	server.teamlancerAuthenticator = &routingTeamlancerAuthenticator{
+		results: map[string]*tlauth.Result{
+			"roomless-user": {Identity: teamlancerIdentity("roomless-user", tlauth.Permissions{JoinVoice: true, PublishAudio: true, ReceiveAudio: true})},
+		},
+	}
 
 	if err := server.Start(); err != nil {
 		t.Fatalf("start failed: %v", err)
@@ -535,8 +540,8 @@ func TestLegacyModeBoardIsolationUnchanged(t *testing.T) {
 		}
 	}()
 
-	client, session := connectMumbleWebSocketClient(t, "legacy-user")
-	channel := server.AddChannel("legacy-temp")
+	client, session := connectMumbleWebSocketClient(t, "roomless-user")
+	channel := server.AddChannel("movable-temp")
 	server.RootChannel().AddChild(channel)
 
 	if err := writeProtoMessage(client, &mumbleproto.UserState{
@@ -548,7 +553,7 @@ func TestLegacyModeBoardIsolationUnchanged(t *testing.T) {
 
 	waitForCondition(t, time.Second, func() bool {
 		return findClientBySession(t, server, session).Channel.Id == channel.Id
-	}, "legacy move into temp channel")
+	}, "roomless move into temp channel")
 
 	closeMumbleClient(t, client, server, 0)
 }
@@ -578,6 +583,7 @@ func connectMumbleWebSocketClient(t *testing.T, username string) (*websocket.Con
 	}
 	if err := writeProtoMessage(conn, &mumbleproto.Authenticate{
 		Username:     proto.String(username),
+		Password:     proto.String(testVoiceJWT(t, time.Now().Add(time.Minute), "board-default")),
 		CeltVersions: []int32{CeltCompatBitstream},
 		Opus:         proto.Bool(true),
 	}); err != nil {

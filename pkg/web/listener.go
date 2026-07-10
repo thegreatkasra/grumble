@@ -150,6 +150,31 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUpgradeRequired), http.StatusUpgradeRequired)
 		return
 	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"remote_ip":     remoteHost(r.RemoteAddr),
+			"listener_type": "websocket",
+			"reason":        "missing origin",
+		})
+		l.logEvent("warn", "voice_ws_rejected", map[string]string{
+			"reason": "missing_origin",
+		})
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	if l.cfg.ValidateOrigin != nil && !l.cfg.ValidateOrigin(origin) {
+		l.logEvent("warn", "websocket_rejected", map[string]string{
+			"remote_ip":     remoteHost(r.RemoteAddr),
+			"listener_type": "websocket",
+			"reason":        "invalid origin",
+		})
+		l.logEvent("warn", "voice_ws_rejected", map[string]string{
+			"reason": "invalid_origin",
+		})
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
 
 	protocol := negotiateSubprotocol(r.Header.Get("Sec-WebSocket-Protocol"), l.cfg.RequiredProtocols)
 	if protocol == "" {
