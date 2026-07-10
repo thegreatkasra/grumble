@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -103,8 +104,12 @@ func (server *Server) handleTeamlancerAuthenticate(client *Client, auth *mumblep
 	}
 	if !tlguard.CanJoinVoice(result.Identity) {
 		server.logVoiceWebSocketRejected(client, "permission_denied", result.Identity.BoardID)
+		presented, _ := json.Marshal(result.Identity.Permissions.PresentedNames())
 		server.logAuthEvent("warn", "voice_auth_failed", client, result.Identity.UserID, map[string]string{
-			"reason": "permission_denied",
+			"reason":                 "permission_denied",
+			"required_permission":    tlauth.PermissionVoiceJoin,
+			"presented_permissions":  string(presented),
+			"board_id":               strings.TrimSpace(result.Identity.BoardID),
 		})
 		client.RejectAuth(mumbleproto.Reject_WrongUserPW, "Authentication failed")
 		return false

@@ -6,6 +6,7 @@ package main
 
 import (
 	"mumble.info/grumble/pkg/acl"
+	tlauth "mumble.info/grumble/pkg/teamlancer/auth"
 )
 
 // A VoiceTarget holds information about a single
@@ -138,7 +139,7 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 				continue
 			}
 			if !server.canReceiveVoice(target) {
-				server.logVoicePermissionDenied("voice_permission_denied", target, "receive_audio", "receive")
+				server.logVoicePermissionDenied("voice_permission_denied", target, tlauth.PermissionVoiceReceive, "receive")
 				continue
 			}
 			buf[0] = kind | 2
@@ -156,7 +157,7 @@ func (vt *VoiceTarget) SendVoiceBroadcast(vb *VoiceBroadcast) {
 				continue
 			}
 			if !server.canReceiveVoice(target) {
-				server.logVoicePermissionDenied("voice_permission_denied", target, "receive_audio", "receive")
+				server.logVoicePermissionDenied("voice_permission_denied", target, tlauth.PermissionVoiceReceive, "receive")
 				continue
 			}
 			buf[0] = kind | 2

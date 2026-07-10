@@ -291,16 +291,25 @@ func TestTeamlancerJoinVoiceDeniedRejectsAuthentication(t *testing.T) {
 	server, cleanup := newTeamlancerTestServer(t, true)
 	defer cleanup()
 
+	var logs bytes.Buffer
+	server.Logger = log.New(&logs, "", 0)
 	stub := &stubTeamlancerAuthenticator{
 		result: &tlauth.Result{
 			Identity: &tlauth.UserIdentity{
 				UserID:      "user-99",
 				DisplayName: "Denied User",
-				Permissions: tlauth.Permissions{JoinVoice: false, PublishAudio: true, ReceiveAudio: true},
+				BoardID:     "board-denied",
+				Permissions: tlauth.Permissions{
+					JoinVoice:     false,
+					PublishAudio:  true,
+					ReceiveAudio:  true,
+					Presented:     []string{tlauth.PermissionVoicePublish, tlauth.PermissionVoiceReceive},
+				},
 			},
 		},
 	}
 	runtimeConfig.TeamlancerAuthMode = tlauth.ModeInternal
+	runtimeConfig.LogFormat = "json"
 	runtimeConfig.EnablePublicWebSocket = true
 	server.teamlancerAuthenticator = stub
 
@@ -316,7 +325,7 @@ func TestTeamlancerJoinVoiceDeniedRejectsAuthentication(t *testing.T) {
 	conn := openMumbleWebSocketClient(t)
 	defer conn.Close()
 	performMumbleVersionHandshake(t, conn)
-	writeAuthenticateMessage(t, conn, "denied-by-guard", "")
+	writeAuthenticateMessage(t, conn, "denied-by-guard", "should-not-appear-in-logs")
 
 	kind, payload, err := readUntilMessage(conn, 3*time.Second, mumbleproto.MessageReject)
 	if err != nil {
@@ -331,6 +340,21 @@ func TestTeamlancerJoinVoiceDeniedRejectsAuthentication(t *testing.T) {
 	}
 	if reject.GetType() != mumbleproto.Reject_WrongUserPW {
 		t.Fatalf("expected wrong user password reject, got %v", reject.GetType())
+	}
+
+	events := lifecycleEventsFromBuffer(t, logs.String())
+	assertEventPresent(t, events, "voice_auth_failed")
+	if got := eventField(t, events, "voice_auth_failed", "reason"); got != "permission_denied" {
+		t.Fatalf("expected permission_denied reason, got %q", got)
+	}
+	if got := eventField(t, events, "voice_auth_failed", "required_permission"); got != tlauth.PermissionVoiceJoin {
+		t.Fatalf("expected required_permission %q, got %q", tlauth.PermissionVoiceJoin, got)
+	}
+	if got := eventField(t, events, "voice_auth_failed", "presented_permissions"); !strings.Contains(got, tlauth.PermissionVoicePublish) {
+		t.Fatalf("expected presented permissions in log, got %q", got)
+	}
+	if strings.Contains(logs.String(), "should-not-appear-in-logs") {
+		t.Fatalf("permission_denied log leaked token: %s", logs.String())
 	}
 
 	waitForCondition(t, 3*time.Second, func() bool {
@@ -458,9 +482,9 @@ func testVoiceJWT(t *testing.T, exp time.Time, boardID string) string {
 		"team_id":  "team-7",
 		"board_id": boardID,
 		"permissions": []string{
-			"join_voice",
-			"publish_audio",
-			"receive_audio",
+			"voice.join",
+			"voice.publish",
+			"voice.receive",
 		},
 	})
 	if err != nil {

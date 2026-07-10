@@ -318,8 +318,8 @@ func TestTeamlancerPublishAudioBlocked(t *testing.T) {
 	if got := eventField(t, events, "voice_permission_denied", "user_id"); got != "user-alice" {
 		t.Fatalf("expected user_id user-alice, got %q", got)
 	}
-	if got := eventField(t, events, "voice_permission_denied", "permission"); got != "publish_audio" {
-		t.Fatalf("expected publish_audio permission, got %q", got)
+	if got := eventField(t, events, "voice_permission_denied", "permission"); got != "voice.publish" {
+		t.Fatalf("expected voice.publish permission, got %q", got)
 	}
 	if got := eventField(t, events, "voice_permission_denied", "action"); got != "publish" {
 		t.Fatalf("expected publish action, got %q", got)

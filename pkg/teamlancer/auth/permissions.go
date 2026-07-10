@@ -2,11 +2,21 @@ package auth
 
 import "strings"
 
+const (
+	PermissionVoiceJoin     = "voice.join"
+	PermissionVoicePublish  = "voice.publish"
+	PermissionVoiceReceive  = "voice.receive"
+	PermissionVoiceModerate = "voice.moderate"
+)
+
 type Permissions struct {
 	JoinVoice     bool
 	PublishAudio  bool
 	ReceiveAudio  bool
 	ModerateVoice bool
+	// Presented is the whitespace-trimmed permission strings from the JWT claim,
+	// in claim order. Unknown names are preserved for diagnostics.
+	Presented []string
 }
 
 func DefaultPermissions() Permissions {
@@ -18,16 +28,39 @@ func DefaultPermissions() Permissions {
 }
 
 func ParsePermissionName(name string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "joinvoice", "join_voice":
-		return "join_voice", true
-	case "publishaudio", "publish_audio":
-		return "publish_audio", true
-	case "receiveaudio", "receive_audio":
-		return "receive_audio", true
-	case "moderatevoice", "moderate_voice":
-		return "moderate_voice", true
+	normalized := strings.TrimSpace(name)
+	switch normalized {
+	case PermissionVoiceJoin:
+		return PermissionVoiceJoin, true
+	case PermissionVoicePublish:
+		return PermissionVoicePublish, true
+	case PermissionVoiceReceive:
+		return PermissionVoiceReceive, true
+	case PermissionVoiceModerate:
+		return PermissionVoiceModerate, true
 	default:
 		return "", false
 	}
+}
+
+func (p Permissions) PresentedNames() []string {
+	if len(p.Presented) > 0 {
+		out := make([]string, len(p.Presented))
+		copy(out, p.Presented)
+		return out
+	}
+	out := make([]string, 0, 4)
+	if p.JoinVoice {
+		out = append(out, PermissionVoiceJoin)
+	}
+	if p.PublishAudio {
+		out = append(out, PermissionVoicePublish)
+	}
+	if p.ReceiveAudio {
+		out = append(out, PermissionVoiceReceive)
+	}
+	if p.ModerateVoice {
+		out = append(out, PermissionVoiceModerate)
+	}
+	return out
 }

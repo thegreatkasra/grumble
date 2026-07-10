@@ -128,6 +128,7 @@ func (a InternalAuthenticator) Authenticate(ctx context.Context, req Request) (*
 				PublishAudio:  claims.Permissions.PublishAudio,
 				ReceiveAudio:  claims.Permissions.ReceiveAudio,
 				ModerateVoice: claims.Permissions.ModerateVoice,
+				Presented:     append([]string(nil), claims.Permissions.Presented...),
 			},
 		},
 	}, nil
@@ -143,6 +144,8 @@ func mapJWTError(err error) error {
 		return ErrInvalidIssuer
 	case errors.Is(err, tljwt.ErrInvalidAudience):
 		return ErrInvalidAudience
+	case errors.Is(err, tljwt.ErrInvalidPermissions):
+		return ErrInvalidToken
 	default:
 		return ErrInvalidToken
 	}

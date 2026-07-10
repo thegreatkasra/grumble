@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+// Canonical voice permission claim values. Keep in sync with
+// pkg/teamlancer/auth permission constants.
+const (
+	PermissionVoiceJoin     = "voice.join"
+	PermissionVoicePublish  = "voice.publish"
+	PermissionVoiceReceive  = "voice.receive"
+	PermissionVoiceModerate = "voice.moderate"
+)
+
 type Config struct {
 	Secret   string
 	Issuer   string
@@ -41,6 +50,7 @@ type Permissions struct {
 	PublishAudio  bool
 	ReceiveAudio  bool
 	ModerateVoice bool
+	Presented     []string
 }
 
 type tokenHeader struct {
@@ -141,7 +151,7 @@ func (v *Validator) Validate(token string) (*Claims, error) {
 	}
 	permissions, err := parsePermissions(raw.Permissions)
 	if err != nil {
-		return nil, ErrInvalidToken
+		return nil, err
 	}
 
 	return &Claims{
@@ -217,14 +227,34 @@ func containsAudience(audience []string, want string) bool {
 
 func parsePermissions(raw json.RawMessage) (Permissions, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return defaultPermissions(), nil
+		return Permissions{}, ErrInvalidPermissions
+	}
+
+	trimmed := strings.TrimSpace(string(raw))
+	if len(trimmed) >= 2 && trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return Permissions{}, ErrInvalidPermissions
+		}
+		encoded = strings.TrimSpace(encoded)
+		if encoded == "" {
+			return Permissions{}, ErrInvalidPermissions
+		}
+		return parsePermissions(json.RawMessage(encoded))
 	}
 
 	var names []string
 	if err := json.Unmarshal(raw, &names); err == nil {
-		perms := Permissions{}
+		perms := Permissions{
+			Presented: make([]string, 0, len(names)),
+		}
 		for _, name := range names {
-			normalized, ok := parsePermissionName(name)
+			trimmedName := strings.TrimSpace(name)
+			if trimmedName == "" {
+				continue
+			}
+			perms.Presented = append(perms.Presented, trimmedName)
+			normalized, ok := parsePermissionName(trimmedName)
 			if !ok {
 				continue
 			}
@@ -235,9 +265,18 @@ func parsePermissions(raw json.RawMessage) (Permissions, error) {
 
 	var flags map[string]bool
 	if err := json.Unmarshal(raw, &flags); err == nil {
-		perms := defaultPermissions()
+		perms := Permissions{
+			Presented: make([]string, 0, len(flags)),
+		}
 		for name, enabled := range flags {
-			normalized, ok := parsePermissionName(name)
+			trimmedName := strings.TrimSpace(name)
+			if trimmedName == "" {
+				continue
+			}
+			if enabled {
+				perms.Presented = append(perms.Presented, trimmedName)
+			}
+			normalized, ok := parsePermissionName(trimmedName)
 			if !ok {
 				continue
 			}
@@ -246,49 +285,43 @@ func parsePermissions(raw json.RawMessage) (Permissions, error) {
 		return perms, nil
 	}
 
-	return Permissions{}, fmt.Errorf("invalid permissions claim")
+	return Permissions{}, ErrInvalidPermissions
 }
 
 func applyPermission(perms *Permissions, name string, enabled bool) {
 	switch name {
-	case "join_voice":
+	case PermissionVoiceJoin:
 		perms.JoinVoice = enabled
-	case "publish_audio":
+	case PermissionVoicePublish:
 		perms.PublishAudio = enabled
-	case "receive_audio":
+	case PermissionVoiceReceive:
 		perms.ReceiveAudio = enabled
-	case "moderate_voice":
+	case PermissionVoiceModerate:
 		perms.ModerateVoice = enabled
 	}
 }
 
-func defaultPermissions() Permissions {
-	return Permissions{
-		JoinVoice:    true,
-		PublishAudio: true,
-		ReceiveAudio: true,
-	}
-}
-
 func parsePermissionName(name string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "joinvoice", "join_voice":
-		return "join_voice", true
-	case "publishaudio", "publish_audio":
-		return "publish_audio", true
-	case "receiveaudio", "receive_audio":
-		return "receive_audio", true
-	case "moderatevoice", "moderate_voice":
-		return "moderate_voice", true
+	normalized := strings.TrimSpace(name)
+	switch normalized {
+	case PermissionVoiceJoin:
+		return PermissionVoiceJoin, true
+	case PermissionVoicePublish:
+		return PermissionVoicePublish, true
+	case PermissionVoiceReceive:
+		return PermissionVoiceReceive, true
+	case PermissionVoiceModerate:
+		return PermissionVoiceModerate, true
 	default:
 		return "", false
 	}
 }
 
 var (
-	ErrInvalidToken    = errors.New("invalid token")
-	ErrExpiredToken    = errors.New("expired token")
-	ErrMissingClaim    = errors.New("missing claim")
-	ErrInvalidIssuer   = errors.New("invalid issuer")
-	ErrInvalidAudience = errors.New("invalid audience")
+	ErrInvalidToken       = errors.New("invalid token")
+	ErrExpiredToken       = errors.New("expired token")
+	ErrMissingClaim       = errors.New("missing claim")
+	ErrInvalidIssuer      = errors.New("invalid issuer")
+	ErrInvalidAudience    = errors.New("invalid audience")
+	ErrInvalidPermissions = fmt.Errorf("%w: invalid permissions claim", ErrInvalidToken)
 )

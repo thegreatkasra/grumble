@@ -351,8 +351,8 @@ func (client *Client) udpRecvLoop() {
 			fallthrough
 		case mumbleproto.UDPMessageVoiceOpus:
 			if !client.canPublishVoice() {
-				client.server.logVoicePermissionDenied("voice_publish_denied", client, "publish_audio", "publish")
-				client.server.logVoicePermissionDenied("voice_permission_denied", client, "publish_audio", "publish")
+				client.server.logVoicePermissionDenied("voice_publish_denied", client, tlauth.PermissionVoicePublish, "publish")
+				client.server.logVoicePermissionDenied("voice_permission_denied", client, tlauth.PermissionVoicePublish, "publish")
 				continue
 			}
 

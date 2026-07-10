@@ -463,7 +463,7 @@ func (server *Server) handlerLoop() {
 						continue
 					}
 					if !server.canReceiveVoice(client) {
-						server.logVoicePermissionDenied("voice_permission_denied", client, "receive_audio", "receive")
+						server.logVoicePermissionDenied("voice_permission_denied", client, tlauth.PermissionVoiceReceive, "receive")
 						continue
 					}
 					err := client.SendUDP(vb.buf)

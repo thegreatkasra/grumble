@@ -21,8 +21,11 @@ func TestInternalAuthenticatorReturnsIdentity(t *testing.T) {
 		"aud":      "grumble-voice",
 		"team_id":  "team-7",
 		"board_id": "board-3",
-		"permissions": map[string]bool{
-			"moderate_voice": true,
+		"permissions": []string{
+			"voice.join",
+			"voice.publish",
+			"voice.receive",
+			"voice.moderate",
 		},
 	})
 
